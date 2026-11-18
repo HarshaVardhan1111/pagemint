@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
 from urllib.request import getproxies, proxy_bypass
@@ -160,14 +161,9 @@ class Fetcher:
         method = method.upper()
         if method not in ("GET", "POST"):
             raise ValueError(f"unsupported method {method}")
-        try:
-            return await asyncio.wait_for(
-                self._fetch(url, page, check_robots, method, json_body, max_bytes), timeout=self.settings.page_timeout
-            )
-        except asyncio.TimeoutError as e:
-            raise FetchTimeoutError(
-                f"Timed out fetching {url} after {self.settings.page_timeout:g} seconds in total."
-            ) from e
+        # The page timeout starts once the rate limiter lets the first request go,
+        # so waiting in line behind other requests to the same site does not count.
+        return await self._fetch(url, page, check_robots, method, json_body, max_bytes)
 
     async def fetch_json(
         self, url: str, *, method: str = "GET", json_body: dict | None = None, max_bytes: int | None = None
@@ -221,6 +217,7 @@ class Fetcher:
         s = self.settings
         current = url
         redirects: list[str] = []
+        deadline: float | None = None
         for _ in range(s.max_redirects + 1):
             scheme, host, port = validate_url(current)
             await resolve_and_check(
@@ -232,8 +229,17 @@ class Fetcher:
                 if delay:
                     self.rate.set_interval(host, delay)
             await self.rate.wait(host)
-
-            res = await self._get(current, page, method, json_body, max_bytes or s.max_bytes)
+            if deadline is None:
+                deadline = time.monotonic() + s.page_timeout
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                res = await asyncio.wait_for(
+                    self._get(current, page, method, json_body, max_bytes or s.max_bytes), timeout=remaining
+                )
+            except asyncio.TimeoutError as e:
+                raise FetchTimeoutError(f"Timed out fetching {url} after {s.page_timeout:g} seconds in total.") from e
             if res is None:
                 raise FetchError(f"Empty response from {current}.")
             if isinstance(res, str):  # redirect target

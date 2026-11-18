@@ -216,7 +216,7 @@ async def _detect_by_url(client: "PageMint", url: str) -> Detection:
         return Detection(board, board.board, "confirmed")
     listed = await _list(client, board)
     if listed is None:
-        return Detection(board, board.board, "confirmed", [f"Could not read the {board.system} board '{board.board}'."], [])
+        return Detection(board, board.board, "confirmed", [f"Could not read the {board.system} board '{board.board}' right now."], None)
     jobs, name = listed
     return Detection(board, name or board.board, "confirmed", [], jobs)
 

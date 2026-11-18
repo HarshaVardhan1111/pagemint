@@ -137,3 +137,65 @@ async def test_saved_companies_actions(base, svc):
     assert (await svc.saved_companies("list"))["count"] == 0
     assert (await svc.saved_companies("rename", "x"))["error"]["type"] == "invalid_argument"
     assert (await svc.saved_companies("add"))["error"]["type"] == "invalid_argument"
+
+
+def _age_cache(store, hours):
+    import time as _time
+
+    store._exec("UPDATE job_cache SET fetched_at = ?", (_time.time() - hours * 3600,))
+
+
+async def test_board_gone_drops_cache(base, svc, monkeypatch):
+    base.route("/v1/boards/acme/jobs", Response(js(GREENHOUSE), headers=JSON))
+    await svc.company_jobs("Acme")
+    del base.routes["/v1/boards/acme/jobs"]  # board now answers 404
+    monkeypatch.setattr(service_mod, "cache_seconds", lambda settings: 0)
+    r = await svc.search_jobs("python", sources="companies")
+    assert r["jobs"] == []
+    assert any("not found" in s["reason"] for s in r["skipped"])
+
+
+async def test_stale_cache_is_unverified_and_limited(base, svc, monkeypatch):
+    base.route("/v1/boards/acme/jobs", Response(js(GREENHOUSE), headers=JSON))
+    await svc.company_jobs("Acme")
+    base.route("/v1/boards/acme/jobs", Response("oops", status=500, headers={"Content-Type": "text/plain"}))
+    monkeypatch.setattr(service_mod, "cache_seconds", lambda settings: 0)
+    r = await svc.search_jobs("python", sources="companies")
+    assert [j["status"] for j in r["jobs"]] == ["unverified"]
+    _age_cache(svc.store, 72)
+    r2 = await svc.search_jobs("python", sources="companies")
+    assert r2["jobs"] == [] and r2["skipped"]
+
+
+async def test_failed_listing_during_detection_is_not_cached_empty(base, svc):
+    base.route("/v0/postings/beta", Response("busy", status=503, headers={"Content-Type": "text/plain"}))
+    first = await svc.company_jobs("https://jobs.lever.co/beta")
+    assert "error" in first or first.get("total_open") != 0 or first.get("warnings")
+    base.route("/v0/postings/beta", Response(js(LEVER), headers=JSON))
+    r = await svc.search_jobs("go", sources="companies")
+    assert [j["title"] for j in r["jobs"]] == ["Backend Engineer (Go)"]
+
+
+async def test_companies_argument_resolved_concurrently_within_budget(base, tmp_path):
+    import time as _time
+
+    for name in ("alpha", "bravo", "charlie"):
+        base.route(f"/v1/boards/{name}/jobs", Response(js(GREENHOUSE), headers=JSON, delay=0.8))
+    client = PageMint(make_settings(jobs_search_budget=3))
+    s = JobService(client, JobStore(str(tmp_path / "j.db")))
+    t0 = _time.monotonic()
+    r = await s.search_jobs("python", companies=["Alpha", "Bravo", "Charlie"], sources="companies")
+    elapsed = _time.monotonic() - t0
+    await client.aclose()
+    assert elapsed < 2.5, elapsed
+    assert r["searched"]["companies"] == 3
+
+
+async def test_check_job_company_hosted_greenhouse_url(base, svc):
+    hosted = {"jobs": [dict(GREENHOUSE["jobs"][0], absolute_url="https://acme.example/careers?gh_jid=101")], "meta": {"total": 1}}
+    base.route("/v1/boards/acme/jobs", Response(js(hosted), headers=JSON))
+    await svc.company_jobs("Acme")
+    r = await svc.check_job("https://acme.example/careers?gh_jid=101")
+    assert r["status"] == "closed" and "greenhouse" in r["reason"]  # /jobs/101 not routed → 404 → closed
+    base.route("/v1/boards/acme/jobs/101", Response(js(GREENHOUSE_JOB), headers=JSON))
+    assert (await svc.check_job("https://acme.example/careers?gh_jid=101"))["status"] == "open"

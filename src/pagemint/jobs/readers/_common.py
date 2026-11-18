@@ -6,6 +6,12 @@ from typing import TYPE_CHECKING, Any
 
 from pagemint.errors import FetchError
 
+
+class BoardGoneError(FetchError):
+    """The job board or feed no longer exists (HTTP 404/410)."""
+
+    type = "not_found"
+
 if TYPE_CHECKING:
     from pagemint.client import PageMint
 
@@ -18,7 +24,7 @@ async def get_json(client: "PageMint", url: str, what: str, *, method: str = "GE
     """Fetch JSON; a 404/410 raises FetchError('... not found'), other errors FetchError."""
     status, data = await client.fetcher.fetch_json(url, method=method, json_body=body, max_bytes=FEED_MAX_BYTES)
     if status in GONE:
-        raise FetchError(f"{what} not found (HTTP {status}).")
+        raise BoardGoneError(f"{what} not found (HTTP {status}).")
     if not 200 <= status < 300 or data is None:
         raise FetchError(f"{what} could not be read (HTTP {status}).")
     return data

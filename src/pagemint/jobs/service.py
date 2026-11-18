@@ -14,6 +14,7 @@ from pagemint.jobs.jsonld import parse_jobpostings, read_careers_page
 from pagemint.jobs.model import Board, Job
 from pagemint.jobs.rank import filter_and_rank
 from pagemint.jobs.readers import READERS
+from pagemint.jobs.readers._common import BoardGoneError
 from pagemint.jobs.sources import SOURCES
 from pagemint.jobs.store import JobStore, company_key
 
@@ -23,6 +24,7 @@ SEARCH_LIMIT_MAX = 100
 COMPANY_LIMIT_MAX = 50
 SOURCE_CACHE_MAX_S = 3600  # free sources update often; cache them for at most an hour
 SOURCE_MODES = ("all", "companies")
+STALE_MAX_S = 48 * 3600  # never serve cached jobs older than this when a refresh fails
 
 
 def cache_seconds(settings: Settings) -> float:
@@ -79,12 +81,22 @@ class JobService:
             return cached[0], []
         try:
             jobs = await self._fetch_board(board, deadline)
+        except BoardGoneError as e:
+            # The board itself is gone: its cached jobs are closed, not stale.
+            self.store.set_error(key, e.message)
+            self.store.drop_cache(key)
+            raise
         except PageMintError as e:
             self.store.set_error(key, e.message)
-            stale = self.store.cached_jobs(key, None)
+            stale = self.store.cached_jobs(key, STALE_MAX_S)
             if stale is None:
                 raise
-            return stale[0], [f"{board.board}: could not refresh ({e.message}); using cached jobs from {_ago(stale[1])} ago."]
+            for j in stale[0]:
+                j.status = "unverified"
+            return stale[0], [
+                f"{board.board}: could not refresh ({e.message}); showing cached jobs from {_ago(stale[1])} ago "
+                "as unverified."
+            ]
         self.store.cache_jobs(key, jobs)
         return jobs, []
 
@@ -155,16 +167,26 @@ class JobService:
 
             rows: list[dict] = []
             if companies:
-                for name in companies:
-                    try:
-                        row, det = await self._resolve(name)
+                if isinstance(companies, str):
+                    companies = [companies]
+                resolving = {asyncio.ensure_future(self._resolve(n)): n for n in companies}
+                done, pending = await asyncio.wait(resolving, timeout=max(0.0, deadline - time.monotonic()))
+                for t in pending:
+                    t.cancel()
+                    skipped.append({"company": resolving[t], "reason": "time limit reached while finding the company"})
+                for t in done:
+                    exc = t.exception()
+                    if isinstance(exc, LookupError):
+                        skipped.append({"company": resolving[t], "reason": str(exc)})
+                    elif isinstance(exc, PageMintError):
+                        skipped.append({"company": resolving[t], "reason": exc.message})
+                    elif exc is not None:
+                        skipped.append({"company": resolving[t], "reason": f"{type(exc).__name__}: {exc}"})
+                    else:
+                        row, det = t.result()
                         rows.append(row)
                         if det:
                             warnings.extend(det.warnings)
-                    except LookupError as e:
-                        skipped.append({"company": name, "reason": str(e)})
-                    except PageMintError as e:
-                        skipped.append({"company": name, "reason": e.message})
             else:
                 rows = self.store.list_companies()
             if not rows and sources == "companies":
@@ -220,10 +242,27 @@ class JobService:
                 log.exception("search_jobs failed")
             return error_dict(e)
 
+    def _greenhouse_ref(self, url: str) -> tuple[Board, str] | None:
+        """Company-hosted Greenhouse job links (e.g. example.com/careers?gh_jid=123): find the board
+        among saved Greenhouse companies whose cached jobs include this job."""
+        from urllib.parse import parse_qs, urlsplit
+
+        job_id = (parse_qs(urlsplit(url).query).get("gh_jid") or [""])[0]
+        if not job_id.isdigit():
+            return None
+        for row in self.store.list_companies():
+            if row["system"] != "greenhouse":
+                continue
+            board = JobStore.board_of(row)
+            cached = self.store.cached_jobs(company_key(board), None)
+            if cached and any(j.job_id == job_id or j.url == url for j in cached[0]):
+                return board, job_id
+        return None
+
     async def check_job(self, url: str) -> dict:
         try:
             target = self.client._check_url(url)
-            ref = detect.job_ref_from_url(target)
+            ref = detect.job_ref_from_url(target) or self._greenhouse_ref(target)
             if ref and ref[0].system in READERS:
                 board, job_id = ref
                 job = await READERS[board.system].get_job(self.client, board, job_id)

@@ -232,3 +232,13 @@ async def test_fetch_json_max_bytes_override(server):
             await c.fetcher.fetch_json(server.url("/big.json"))
         status, data = await c.fetcher.fetch_json(server.url("/big.json"), max_bytes=10_000)
     assert status == 200 and len(data[0]) == 3000
+
+
+async def test_rate_limit_wait_does_not_count_against_page_timeout(server):
+    import asyncio as _asyncio
+
+    for i in range(4):
+        server.route(f"/q{i}", "<html><body><main><p>queued page</p></main></body></html>")
+    async with PageMint(make_settings(rate_limit=0.5, page_timeout=1.0)) as c:
+        results = await _asyncio.gather(*(c.scrape(server.url(f"/q{i}")) for i in range(4)))
+    assert all("error" not in r for r in results), [r.get("error") for r in results]

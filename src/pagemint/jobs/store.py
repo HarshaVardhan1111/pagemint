@@ -177,5 +177,9 @@ class JobStore:
             return None
         return [Job.from_dict(d) for d in json.loads(rows[0]["jobs_json"])], age
 
+    def drop_cache(self, key: str) -> None:
+        self._exec("DELETE FROM job_cache WHERE key = ?", (key,))
+        self._exec("UPDATE companies SET job_count = 0 WHERE key = ?", (key,))
+
     def set_error(self, key: str, message: str) -> None:
         self._exec("UPDATE companies SET last_error = ? WHERE key = ?", (message, key))

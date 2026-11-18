@@ -93,3 +93,9 @@ def test_remote_job_limited_to_a_place_must_match_location():
     assert titles(filter_and_rank(jobs, location="London", today=TODAY)) == ["B", "C"]
     assert set(titles(filter_and_rank(jobs, location="UK", today=TODAY))) == {"B", "C", "E"}
     assert set(titles(filter_and_rank(jobs, location="USA", today=TODAY))) == {"A", "B", "C", "D"}
+
+
+def test_full_description_unescapes_escaped_html():
+    j = J("T", desc="&lt;p&gt;Hi &lt;strong&gt;there&lt;/strong&gt; &amp;amp; you&lt;/p&gt;")
+    full = j.to_dict(snippet=False)["description"]
+    assert "&lt;" not in full and "<p>" not in full and "**there**" in full and "& you" in full

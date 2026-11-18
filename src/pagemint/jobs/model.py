@@ -93,7 +93,9 @@ class Job:
             from pagemint.markdown import to_markdown
 
             body = self.description or ""
-            md = to_markdown(body, self.url) if "<" in body else body
+            if "&lt;" in body:  # escaped HTML (Greenhouse, many JSON-LD pages)
+                body = html_lib.unescape(body)
+            md = to_markdown(body, self.url) if "<" in body else html_lib.unescape(body)
             d["description"] = md[:FULL_CHARS]
         return d
 
