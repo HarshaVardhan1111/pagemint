@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import logging
-import sys
+from contextlib import asynccontextmanager
 from typing import Callable, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -30,8 +29,18 @@ def _result(data: dict) -> CallToolResult:
 
 
 def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer:
-    server = MCPServer(name="pagemint", version=__version__, instructions=INSTRUCTIONS)
     holder: dict[str, PageMint] = {}
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        try:
+            yield {}
+        finally:  # close HTTP connections and the browser on shutdown
+            c = holder.pop("c", None)
+            if c is not None:
+                await c.aclose()
+
+    server = MCPServer(name="pagemint", version=__version__, instructions=INSTRUCTIONS, lifespan=lifespan)
 
     def client() -> PageMint:
         if "c" not in holder:
@@ -87,10 +96,4 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer
         """
         return _result(await client().map_site(url, limit=limit))
 
-    server._pagemint_holder = holder  # type: ignore[attr-defined]
     return server
-
-
-def main() -> None:
-    logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-    build_server().run("stdio")

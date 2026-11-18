@@ -41,3 +41,22 @@ async def test_mcp_error_marked_is_error():
         res = await c.call_tool("scrape", {"url": "ftp://example.com/"})
     assert res.is_error
     assert json.loads(res.content[0].text)["error"]["type"] == "invalid_url"
+
+
+async def test_stdio_server_end_to_end(server):
+    """Start `python -m pagemint` as a real subprocess and talk MCP over stdio."""
+    import os
+    import sys
+
+    from mcp import StdioServerParameters
+
+    server.route("/", "<html><head><title>E2E</title></head><body><main><p>Over stdio</p></main></body></html>")
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "pagemint", "--allow-private", "--rate-limit", "0"],
+        env={**os.environ, "PAGEMINT_JS_FALLBACK_CHARS": "0"},
+    )
+    async with Client(params) as c:
+        names = {t.name for t in (await c.list_tools()).tools}
+        res = await c.call_tool("scrape", {"url": server.url("/")})
+    assert names == {"scrape", "crawl", "map"}
+    assert json.loads(res.content[0].text)["title"] == "E2E"
