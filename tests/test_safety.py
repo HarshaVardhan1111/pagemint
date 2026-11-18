@@ -221,3 +221,14 @@ async def test_fetch_json_parses_and_rejects_html(server, client):
     assert (await client.fetcher.fetch_json(server.url("/missing.json")))[0] == 404
     with pytest.raises(FetchError):
         await client.fetcher.fetch_json(server.url("/h"))
+
+
+async def test_fetch_json_max_bytes_override(server):
+    from pagemint.errors import TooLargeError
+
+    server.route("/big.json", Response('["' + "x" * 3000 + '"]', headers={"Content-Type": "application/json"}))
+    async with PageMint(make_settings(max_bytes=1000)) as c:
+        with pytest.raises(TooLargeError):
+            await c.fetcher.fetch_json(server.url("/big.json"))
+        status, data = await c.fetcher.fetch_json(server.url("/big.json"), max_bytes=10_000)
+    assert status == 200 and len(data[0]) == 3000

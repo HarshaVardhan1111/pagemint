@@ -149,6 +149,7 @@ class Fetcher:
         check_robots: bool = True,
         method: str = "GET",
         json_body: dict | None = None,
+        max_bytes: int | None = None,
     ) -> FetchResult:
         """Fetch ``url`` safely, following redirects (each hop re-checked).
 
@@ -161,16 +162,21 @@ class Fetcher:
             raise ValueError(f"unsupported method {method}")
         try:
             return await asyncio.wait_for(
-                self._fetch(url, page, check_robots, method, json_body), timeout=self.settings.page_timeout
+                self._fetch(url, page, check_robots, method, json_body, max_bytes), timeout=self.settings.page_timeout
             )
         except asyncio.TimeoutError as e:
             raise FetchTimeoutError(
                 f"Timed out fetching {url} after {self.settings.page_timeout:g} seconds in total."
             ) from e
 
-    async def fetch_json(self, url: str, *, method: str = "GET", json_body: dict | None = None) -> tuple[int, object]:
-        """Fetch a JSON API. Returns ``(status_code, data)``; data is None for non-2xx answers."""
-        res = await self.fetch(url, page=False, method=method, json_body=json_body)
+    async def fetch_json(
+        self, url: str, *, method: str = "GET", json_body: dict | None = None, max_bytes: int | None = None
+    ) -> tuple[int, object]:
+        """Fetch a JSON API. Returns ``(status_code, data)``; data is None for non-2xx answers.
+
+        ``max_bytes`` overrides the page size limit for this call (job feeds can be large).
+        """
+        res = await self.fetch(url, page=False, method=method, json_body=json_body, max_bytes=max_bytes)
         if not 200 <= res.status_code < 300:
             return res.status_code, None
         try:
@@ -209,7 +215,9 @@ class Fetcher:
         except Exception:
             return True
 
-    async def _fetch(self, url: str, page: bool, check_robots: bool, method: str = "GET", json_body=None) -> FetchResult:
+    async def _fetch(
+        self, url: str, page: bool, check_robots: bool, method: str = "GET", json_body=None, max_bytes: int | None = None
+    ) -> FetchResult:
         s = self.settings
         current = url
         redirects: list[str] = []
@@ -225,7 +233,7 @@ class Fetcher:
                     self.rate.set_interval(host, delay)
             await self.rate.wait(host)
 
-            res = await self._get(current, page, method, json_body)
+            res = await self._get(current, page, method, json_body, max_bytes or s.max_bytes)
             if res is None:
                 raise FetchError(f"Empty response from {current}.")
             if isinstance(res, str):  # redirect target
@@ -241,8 +249,11 @@ class Fetcher:
             return res
         raise FetchError(f"Too many redirects (more than {s.max_redirects}) starting at {url}.")
 
-    async def _get(self, url: str, page: bool, method: str = "GET", json_body=None) -> FetchResult | str | None:
+    async def _get(
+        self, url: str, page: bool, method: str = "GET", json_body=None, limit: int | None = None
+    ) -> FetchResult | str | None:
         s = self.settings
+        limit = limit or s.max_bytes
         kwargs = {"json": json_body if json_body is not None else {}} if method == "POST" else {}
         try:
             async with self._client.stream(method, url, **kwargs) as resp:
@@ -254,15 +265,15 @@ class Fetcher:
                     raise ContentTypeError(
                         f"Unsupported content type '{mtype}' at {url}. PageMint reads HTML and plain text pages."
                     )
-                too_large = TooLargeError(f"{url} is larger than the {s.max_bytes} byte limit ({_mb(s.max_bytes)}).")
+                too_large = TooLargeError(f"{url} is larger than the {limit} byte limit ({_mb(limit)}).")
                 declared = resp.headers.get("content-length")
-                if declared and declared.isdigit() and int(declared) > s.max_bytes:
+                if declared and declared.isdigit() and int(declared) > limit:
                     raise too_large
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
-                    if total > s.max_bytes:
+                    if total > limit:
                         raise too_large
                     chunks.append(chunk)
                 content = b"".join(chunks)
