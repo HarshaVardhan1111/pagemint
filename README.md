@@ -2,7 +2,7 @@
 
 **Free, open-source MCP server that turns web pages into clean Markdown for AI agents.**
 
-PageMint gives Claude (and any other MCP client) three tools: `scrape` one page, `crawl` a site, and `map` a site's URLs. It runs on your own machine, so there are no credits, API keys or monthly limits. It is polite by default: it follows robots.txt, rate-limits every site, and refuses to touch private networks.
+PageMint gives Claude (and any other MCP client) tools to `scrape` one page, `crawl` a site, `map` a site's URLs, and **search open jobs** straight from companies' own hiring systems. It runs on your own machine, so there are no credits, API keys or monthly limits. It is polite by default: it follows robots.txt, rate-limits every site, and refuses to touch private networks.
 
 - Clean Markdown: menus, footers, cookie banners and ads are removed; headings, lists, tables, code blocks and links are kept.
 - JavaScript pages: if a page is almost empty without JavaScript, PageMint renders it in headless Chromium (optional install).
@@ -104,6 +104,62 @@ Follows links breadth-first from `url` and returns each page as Markdown.
 Lists URLs on a site without fetching every page: it reads the sitemap first (from robots.txt `Sitemap:` lines, otherwise `/sitemap.xml`, including sitemap indexes and `.gz` files), then adds links from the start page if needed. URLs that robots.txt disallows are left out. Returns `urls`, `source` (`sitemap`, `links` or `sitemap+links`) and `warnings`.
 
 Errors never crash the server. A failed call returns `{"error": {"type": ..., "message": ...}}` with a plain-English message and is marked as an error to the client.
+
+## Job search
+
+Four more tools find **open** jobs straight from the systems companies use to post them, so you don't see closed jobs that linger on job boards.
+
+| Tool | What it does |
+|---|---|
+| `company_jobs(company, query="", location="", remote=None, limit=50)` | Open jobs at one company. `company` is a name (`"Stripe"`) or a careers-page / job-board URL. The company is added to your saved list. |
+| `search_jobs(query, location="", remote=None, posted_within_days=None, companies=None, sources="all", limit=25)` | Searches all saved companies (or the `companies` you pass) plus the free job sources below, best matches first. `sources="companies"` skips the free sources. Max 100 results. |
+| `check_job(url)` | Is this job still open? Returns `open`, `closed` or `unknown` with the reason, and the full description when open. |
+| `saved_companies(action="list", company=None)` | List, `add` or `remove` saved companies. |
+
+Each job has title, company, location, remote / workplace type, employment type, department, posted date, salary (when published), links, a short description, its `source` and a `status`: `open` for jobs read from a company's hiring system, `unverified` for jobs from free sources (run `check_job` on them).
+
+### Where jobs come from
+
+| Source | How | Notes |
+|---|---|---|
+| Greenhouse | public Job Board API | company name is confirmed from the feed |
+| Lever | public Postings API (global and EU) | |
+| Ashby | public job posting API | |
+| Workday | the career site's own JSON endpoints | needs the careers URL (e.g. `https://acme.wd5.myworkdayjobs.com/External`) |
+| Recruitee | public offers API | experimental |
+| Any other careers page | schema.org `JobPosting` data that job pages carry for search engines | follows up to 30 job links; expired jobs are dropped |
+| [Hacker News "Who is hiring?"](https://news.ycombinator.com/submitted?id=whoishiring) | HN Algolia API, current and previous month | free text, parsed best effort |
+| [Arbeitnow](https://www.arbeitnow.com) | free job board API | mostly Europe; credited as its terms ask |
+| [Himalayas](https://himalayas.app) | free remote jobs API | rate-limits quickly; skipped with a note when it does |
+
+**Considered and not used:** LinkedIn, Indeed, Glassdoor and ZipRecruiter (their terms forbid scraping or they block bots), SmartRecruiters (its robots.txt blocks all bots except LinkedIn's), Remotive (robots.txt blocks its API), Workable search (rate-limited, and search URLs are disallowed). Workable careers pages are still read through the general reader when they allow it.
+
+### How finding a company works
+
+- **By URL** (most reliable): PageMint recognises Greenhouse, Lever, Ashby, Workday, Recruitee and Workable links, also when a company's own careers page embeds one. Otherwise it reads the page's job data.
+- **By name**: PageMint tries a few spellings on Greenhouse, Lever and Ashby. A Greenhouse match whose company name agrees is `confirmed`. A Lever or Ashby match is `guessed`, because those feeds don't include the company name, and the result says so. If it's the wrong company, remove it and pass the careers URL instead.
+
+### Matching
+
+Results are ranked by keywords (title matters most, then department, then description) and recency, with no AI involved. `location` is a filter that knows common alternative spellings (Bengaluru/Bangalore, Gurugram/Gurgaon, NYC/New York, UK/United Kingdom...). A remote job matches every location only when it isn't limited to a place: "Remote (worldwide)" matches London, "Remote - US" does not.
+
+### Your data
+
+The saved company list and a cache of job feeds live in a small SQLite file on your computer (`~/.local/share/pagemint` on Linux, `~/Library/Application Support/pagemint` on macOS, `%LOCALAPPDATA%\pagemint` on Windows; change it with `PAGEMINT_DATA_DIR`). Nothing is sent anywhere else.
+
+### Job search limits
+
+| Setting | Default | Environment variable |
+|---|---|---|
+| Job feed cache | 6 hours (free sources: 1 hour) | `PAGEMINT_JOBS_CACHE_HOURS` |
+| Time budget per search | 60 s (slower feeds are listed under `skipped`) | `PAGEMINT_JOBS_SEARCH_BUDGET` |
+| Saved companies | 500 | |
+| Job feed size | 40 MB (large companies' feeds exceed the 5 MB page limit) | |
+| Workday jobs per company | 200 | |
+
+All job requests follow the same robots.txt, rate-limit and safety rules as everything else. Hiring-system hosts are shared by many companies (all Greenhouse boards use one host), so the first search over many saved companies can take a while; later searches use the cache.
+
+To try job search against real sites: `python scripts/live_check.py "data engineer" --location London`.
 
 ## Command line
 
