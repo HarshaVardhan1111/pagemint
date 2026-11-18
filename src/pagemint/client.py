@@ -30,7 +30,6 @@ _SKIP_EXT_RE = re.compile(
     r"docx?|xlsx?|pptx?|odt|ods|csv)$",
     re.I,
 )
-_SITEMAP_LINE_RE = re.compile(r"^\s*sitemap\s*:\s*(\S+)", re.I | re.M)
 MAX_SITEMAP_FILES = 50
 MAX_SITEMAP_NESTING = 3
 
@@ -90,17 +89,6 @@ class PageMint:
         res = await self.fetcher.fetch(url)
         return self._build_page(res, format)
 
-    async def _robots_sitemaps(self, start: str) -> list[str]:
-        parts = urlsplit(start)
-        try:
-            res = await self.fetcher.fetch(f"{parts.scheme}://{parts.netloc}/robots.txt", page=False)
-        except PageMintError:
-            return []
-        if res.status_code != 200:
-            return []
-        text = res.content.decode("utf-8", errors="replace")
-        return [m.group(1) for m in _SITEMAP_LINE_RE.finditer(text)]
-
     # ---- operations ----------------------------------------------------
 
     async def scrape(self, url: str, format: str = "markdown", render_js: bool = False) -> dict:
@@ -135,6 +123,7 @@ class PageMint:
     async def _crawl(self, url, max_pages, max_depth, same_domain, render_js, on_progress) -> dict:
         s = self.settings
         start = self._check_url(url)
+        await self.fetcher.check_host(start)
         warnings: list[str] = []
         if max_pages > MAX_CRAWL_PAGES:
             warnings.append(f"max_pages lowered from {max_pages} to the limit of {MAX_CRAWL_PAGES}.")
@@ -224,15 +213,23 @@ class PageMint:
             limit = MAX_MAP_LIMIT
         limit = max(1, int(limit))
         found: dict[str, None] = {}
+        disallowed: set[str] = set()
 
-        def add(u: str) -> None:
+        async def add(u: str) -> None:
             n = normalize_url(u)
-            if n and same_site(n, start) and len(found) < limit:
-                found.setdefault(n, None)
+            if not n or n in found or n in disallowed or not same_site(n, start) or len(found) >= limit:
+                return
+            if self.settings.respect_robots and not (await self.fetcher.robots.allowed(n))[0]:
+                disallowed.add(n)
+                return
+            found[n] = None
 
         # 1. Sitemaps: robots.txt "Sitemap:" lines, else /sitemap.xml.
         parts = urlsplit(start)
-        sitemaps = await self._robots_sitemaps(start) or [f"{parts.scheme}://{parts.netloc}/sitemap.xml"]
+        # Resolve + SSRF-check the start host before anything else is fetched.
+        await self.fetcher.check_host(start)
+        robots_maps = await self.fetcher.robots.sitemaps(start) if self.settings.respect_robots else []
+        sitemaps = robots_maps or [f"{parts.scheme}://{parts.netloc}/sitemap.xml"]
         todo: deque[tuple[str, int]] = deque((u, 0) for u in sitemaps)
         visited: set[str] = set()
         while todo and len(found) < limit and len(visited) < MAX_SITEMAP_FILES:
@@ -241,7 +238,7 @@ class PageMint:
                 continue
             visited.add(sm)
             try:
-                res = await self.fetcher.fetch(sm, page=False)
+                res = await self.fetcher.fetch(sm, page=False, check_robots=False)
             except PageMintError as e:
                 warnings.append(f"Could not read sitemap {sm}: {e.message}")
                 continue
@@ -249,7 +246,7 @@ class PageMint:
                 continue
             urls, children = parse_sitemap(res.content)
             for u in urls:
-                add(u)
+                await add(u)
             if level < MAX_SITEMAP_NESTING:
                 todo.extend((c, level + 1) for c in children)
         from_sitemap = len(found)
@@ -260,12 +257,14 @@ class PageMint:
             try:
                 page = await self._get_page(start, "links", False)
                 before = len(found)
-                add(page["url"])
+                await add(page["url"])
                 for link in page["links"]:
-                    add(link)
+                    await add(link)
                 from_links = len(found) - before
             except PageMintError as e:
                 warnings.append(f"Could not read the start page for links: {e.message}")
 
+        if disallowed:
+            warnings.append(f"Left out {len(disallowed)} URL(s) that robots.txt disallows.")
         source = "sitemap+links" if from_sitemap and from_links else ("sitemap" if from_sitemap else "links")
         return {"url": start, "urls": list(found), "source": source, "warnings": warnings}

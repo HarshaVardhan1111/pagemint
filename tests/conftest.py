@@ -84,7 +84,11 @@ class LocalServer:
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+        class _Server(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):  # client hung up mid-response
+                pass
+
+        self.httpd = _Server(("127.0.0.1", 0), _H)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)

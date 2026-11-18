@@ -31,6 +31,7 @@ class Settings:
     page_char_cap: int = 20_000
     result_char_cap: int = 300_000
     robots_cache_ttl: float = 3600.0
+    # Internal switch for tests; deliberately not settable from the environment.
     respect_robots: bool = field(default=True)
 
     @classmethod
@@ -38,6 +39,8 @@ class Settings:
         """Build settings from defaults, then ``PAGEMINT_*`` env vars, then overrides."""
         values: dict = {}
         for f in fields(cls):
+            if f.name == "respect_robots":
+                continue
             raw = os.environ.get(f"PAGEMINT_{f.name.upper()}")
             if raw is None:
                 continue

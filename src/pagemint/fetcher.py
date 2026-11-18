@@ -1,17 +1,37 @@
-"""HTTP fetching with httpx."""
+"""HTTP fetching with safety checks on every hop.
+
+Each request (and each redirect hop) is: URL check -> DNS + SSRF check ->
+robots.txt check -> per-host rate limit -> streamed GET with a size cap.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urljoin
+from urllib.request import getproxies, proxy_bypass
 
+import httpcore
 import httpx
 
 from pagemint.config import Settings
-from pagemint.errors import ContentTypeError, FetchError, FetchTimeoutError
+from pagemint.errors import (
+    ContentTypeError,
+    FetchError,
+    FetchTimeoutError,
+    InvalidURLError,
+    RobotsError,
+    TooLargeError,
+)
+from pagemint.links import normalize_url
+from pagemint.ratelimit import RateLimiter
+from pagemint.robots import RobotsCache
+from pagemint.safety import Resolver, resolve_and_check, validate_url
 
 _META_CHARSET_RE = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_.:-]+)""", re.I)
 _TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 
 @dataclass
@@ -53,40 +73,173 @@ def decode_body(content: bytes, content_type_header: str | None) -> str:
     return content.decode("utf-8", errors="replace")
 
 
-class Fetcher:
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self._client = httpx.AsyncClient(
-            headers={"User-Agent": settings.user_agent, "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"},
-            timeout=httpx.Timeout(settings.read_timeout, connect=settings.connect_timeout),
-            follow_redirects=True,
-            max_redirects=settings.max_redirects,
-        )
+class GuardedBackend(httpcore.AsyncNetworkBackend):
+    """Resolves and SSRF-checks the host at the moment of connecting, then
+    connects to the checked address. This closes the gap between the check
+    and the connection (DNS rebinding). Connections stay pooled by host name,
+    so TLS SNI and certificate checks use the real name."""
 
-    async def fetch(self, url: str, *, page: bool = True) -> FetchResult:
-        """GET ``url``. With ``page=True`` only HTML/plain-text responses are accepted."""
-        try:
-            resp = await self._client.get(url)
-        except httpx.TimeoutException as e:
-            raise FetchTimeoutError(f"Timed out fetching {url} ({type(e).__name__}).") from e
-        except httpx.TooManyRedirects as e:
-            raise FetchError(f"Too many redirects (more than {self.settings.max_redirects}) for {url}.") from e
-        except httpx.HTTPError as e:
-            raise FetchError(f"Could not fetch {url}: {type(e).__name__}: {e}") from e
-        ctype_header = resp.headers.get("content-type")
-        mtype = media_type(ctype_header)
-        if page and mtype and mtype not in _TEXT_TYPES:
-            raise ContentTypeError(f"Unsupported content type '{mtype}' at {url}. PageMint reads HTML and plain text pages.")
-        result = FetchResult(
-            url=str(resp.url),
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-            content=resp.content,
-            content_type=mtype or "text/html",
+    def __init__(self, inner: httpcore.AsyncNetworkBackend, fetcher: "Fetcher"):
+        self._inner = inner
+        self._fetcher = fetcher
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        f = self._fetcher
+        addrs = await resolve_and_check(host, port, f.settings.allow_private_networks, f.resolver)
+        last: Exception | None = None
+        for ip in addrs:
+            try:
+                return await self._inner.connect_tcp(ip, port, timeout, local_address, socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout, OSError) as e:
+                last = e
+        assert last is not None
+        raise last
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):  # pragma: no cover
+        raise httpcore.ConnectError("Unix sockets are not supported.")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1_000_000:g} MB"
+
+
+class Fetcher:
+    def __init__(self, settings: Settings, resolver: Resolver | None = None):
+        self.settings = settings
+        self.resolver = resolver
+        self.rate = RateLimiter(settings.rate_limit)
+        self._proxies = {k.lower(): v for k, v in getproxies().items()}
+        self.robots = RobotsCache(settings.user_agent, self._fetch_robots, ttl=settings.robots_cache_ttl)
+        self._client = httpx.AsyncClient(
+            headers={
+                "User-Agent": settings.user_agent,
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+            },
+            timeout=httpx.Timeout(settings.read_timeout, connect=settings.connect_timeout),
+            follow_redirects=False,
         )
-        if page:
-            result.text = decode_body(resp.content, ctype_header)
-        return result
+        # Direct connections go through the guarded backend. Requests sent via a
+        # configured proxy are checked before sending (the proxy connects).
+        pool = self._client._transport._pool  # httpx 0.2x / httpcore 1.x internals
+        pool._network_backend = GuardedBackend(pool._network_backend, self)
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    # ---- public --------------------------------------------------------
+
+    async def fetch(self, url: str, *, page: bool = True, check_robots: bool = True) -> FetchResult:
+        """GET ``url`` safely, following redirects (each hop re-checked).
+
+        With ``page=True`` only HTML/plain-text responses are accepted and the
+        body is decoded into ``text``.
+        """
+        try:
+            return await asyncio.wait_for(self._fetch(url, page, check_robots), timeout=self.settings.page_timeout)
+        except asyncio.TimeoutError as e:
+            raise FetchTimeoutError(
+                f"Timed out fetching {url} after {self.settings.page_timeout:g} seconds in total."
+            ) from e
+
+    async def check_host(self, url: str) -> None:
+        """Validate the URL and run the SSRF check on its host without fetching."""
+        scheme, host, port = validate_url(url)
+        await resolve_and_check(
+            host, port, self.settings.allow_private_networks, self.resolver, via_proxy=self._via_proxy(scheme, host)
+        )
+
+    async def check_allowed(self, url: str) -> None:
+        """Raise RobotsError if robots.txt disallows ``url`` (no-op when robots is off)."""
+        if not self.settings.respect_robots:
+            return
+        entry = await self.robots.entry(url)
+        if entry.unreachable:
+            raise FetchError(f"Could not reach {RobotsCache.origin(url)}: {entry.error}.")
+        ok, reason = await self.robots.allowed(url)
+        if not ok:
+            raise RobotsError(reason)
+
+    # ---- internals -----------------------------------------------------
+
+    async def _fetch_robots(self, url: str) -> FetchResult:
+        return await self.fetch(url, page=False, check_robots=False)
+
+    def _via_proxy(self, scheme: str, host: str) -> bool:
+        if not (self._proxies.get(scheme) or self._proxies.get("all")):
+            return False
+        try:
+            return not proxy_bypass(host)
+        except Exception:
+            return True
+
+    async def _fetch(self, url: str, page: bool, check_robots: bool) -> FetchResult:
+        s = self.settings
+        current = url
+        redirects: list[str] = []
+        for _ in range(s.max_redirects + 1):
+            scheme, host, port = validate_url(current)
+            await resolve_and_check(
+                host, port, s.allow_private_networks, self.resolver, via_proxy=self._via_proxy(scheme, host)
+            )
+            if check_robots and s.respect_robots:
+                await self.check_allowed(current)
+                delay = await self.robots.crawl_delay(current)
+                if delay:
+                    self.rate.set_interval(host, delay)
+            await self.rate.wait(host)
+
+            res = await self._get(current, page)
+            if res is None:
+                raise FetchError(f"Empty response from {current}.")
+            if isinstance(res, str):  # redirect target
+                nxt = normalize_url(res, current)
+                if nxt is None:
+                    raise InvalidURLError(f"{current} redirected to '{res}', which is not an http(s) URL.")
+                redirects.append(current)
+                current = nxt
+                continue
+            res.redirects = redirects
+            return res
+        raise FetchError(f"Too many redirects (more than {s.max_redirects}) starting at {url}.")
+
+    async def _get(self, url: str, page: bool) -> FetchResult | str | None:
+        s = self.settings
+        try:
+            async with self._client.stream("GET", url) as resp:
+                if resp.status_code in _REDIRECT_CODES and resp.headers.get("location"):
+                    return urljoin(url, resp.headers["location"].strip())
+                ctype_header = resp.headers.get("content-type")
+                mtype = media_type(ctype_header)
+                if page and mtype and mtype not in _TEXT_TYPES:
+                    raise ContentTypeError(
+                        f"Unsupported content type '{mtype}' at {url}. PageMint reads HTML and plain text pages."
+                    )
+                too_large = TooLargeError(f"{url} is larger than the {s.max_bytes} byte limit ({_mb(s.max_bytes)}).")
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > s.max_bytes:
+                    raise too_large
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > s.max_bytes:
+                        raise too_large
+                    chunks.append(chunk)
+                content = b"".join(chunks)
+                result = FetchResult(
+                    url=url,
+                    status_code=resp.status_code,
+                    headers=dict(resp.headers),
+                    content=content,
+                    content_type=mtype or "text/html",
+                )
+                if page:
+                    result.text = decode_body(content, ctype_header)
+                return result
+        except httpx.TimeoutException as e:
+            raise FetchTimeoutError(f"Timed out fetching {url} ({type(e).__name__}).") from e
+        except httpx.HTTPError as e:
+            raise FetchError(f"Could not fetch {url}: {type(e).__name__}: {e}") from e
