@@ -161,3 +161,11 @@ async def test_cancelled_waiter_does_not_break_other_requests(server):
         ta.cancel()
         rb = await tb
     assert "error" not in rb and "b page" in rb["content"]
+
+
+async def test_robots_429_disallows(server, client):
+    server.route("/robots.txt", Response("slow down", status=429, headers={"Content-Type": "text/plain"}))
+    server.route("/p", "<html><body>x</body></html>")
+    r = await client.scrape(server.url("/p"))
+    assert r["error"]["type"] == "robots"
+    assert "429" in r["error"]["message"]

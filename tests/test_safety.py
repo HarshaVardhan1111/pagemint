@@ -187,3 +187,37 @@ async def test_proxy_fallback_refuses_internal_looking_names(host):
 
     with pytest.raises(safety.BlockedError):
         await safety.resolve_and_check(host, 80, allow_private=False, resolver=no_dns, via_proxy=True)
+
+
+async def test_post_json_goes_through_checks(server, client):
+    import json as _json
+
+    server.route("/api/jobs", Response('{"ok": true}', headers={"Content-Type": "application/json"}))
+    status, data = await client.fetcher.fetch_json(server.url("/api/jobs"), method="POST", json_body={"limit": 20})
+    assert status == 200 and data == {"ok": True}
+    req = [r for r in server.requests if r.path == "/api/jobs"][0]
+    assert req.method == "POST" and _json.loads(req.body) == {"limit": 20}
+    assert req.headers["content-type"].startswith("application/json")
+    assert req.headers["user-agent"] == UA
+
+
+async def test_post_respects_robots(server, client):
+    server.route("/robots.txt", Response("User-agent: *\nDisallow: /api\n", headers={"Content-Type": "text/plain"}))
+    server.route("/api/jobs", Response("{}", headers={"Content-Type": "application/json"}))
+    from pagemint.errors import RobotsError
+
+    with pytest.raises(RobotsError):
+        await client.fetcher.fetch_json(server.url("/api/jobs"), method="POST", json_body={})
+    assert server.hits("/api/jobs") == 0
+
+
+async def test_fetch_json_parses_and_rejects_html(server, client):
+    from pagemint.errors import FetchError
+
+    server.route("/j", Response('[1, 2]', headers={"Content-Type": "application/json"}))
+    server.route("/h", "<html>not json</html>")
+    server.route("/missing.json", Response("{}", status=404, headers={"Content-Type": "application/json"}))
+    assert await client.fetcher.fetch_json(server.url("/j")) == (200, [1, 2])
+    assert (await client.fetcher.fetch_json(server.url("/missing.json")))[0] == 404
+    with pytest.raises(FetchError):
+        await client.fetcher.fetch_json(server.url("/h"))

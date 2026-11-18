@@ -174,8 +174,9 @@ class RobotsCache:
         if 200 <= res.status_code < 300:
             f = parse_robots(res.content.decode("utf-8-sig", errors="replace"))
             return _Entry(f.rules_for(self.user_agent), f.sitemaps, None, expires)
-        if 400 <= res.status_code < 500:
+        if 400 <= res.status_code < 500 and res.status_code != 429:
             return _Entry(ALLOW_ALL, [], None, expires)  # no robots.txt: everything allowed
+        # 5xx, and 429 ("too many requests"), mean the site is not available to us now.
         return _Entry(ALLOW_ALL, [], f"robots.txt at {robots_url} returned HTTP {res.status_code}", retry)
 
     async def entry(self, url: str) -> _Entry:

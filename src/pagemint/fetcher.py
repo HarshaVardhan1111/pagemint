@@ -7,6 +7,7 @@ robots.txt check -> per-host rate limit -> streamed GET with a size cap.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urljoin
@@ -140,18 +141,42 @@ class Fetcher:
 
     # ---- public --------------------------------------------------------
 
-    async def fetch(self, url: str, *, page: bool = True, check_robots: bool = True) -> FetchResult:
-        """GET ``url`` safely, following redirects (each hop re-checked).
+    async def fetch(
+        self,
+        url: str,
+        *,
+        page: bool = True,
+        check_robots: bool = True,
+        method: str = "GET",
+        json_body: dict | None = None,
+    ) -> FetchResult:
+        """Fetch ``url`` safely, following redirects (each hop re-checked).
 
         With ``page=True`` only HTML/plain-text responses are accepted and the
-        body is decoded into ``text``.
+        body is decoded into ``text``. ``method="POST"`` sends ``json_body`` as
+        JSON; redirects are not followed for POST.
         """
+        method = method.upper()
+        if method not in ("GET", "POST"):
+            raise ValueError(f"unsupported method {method}")
         try:
-            return await asyncio.wait_for(self._fetch(url, page, check_robots), timeout=self.settings.page_timeout)
+            return await asyncio.wait_for(
+                self._fetch(url, page, check_robots, method, json_body), timeout=self.settings.page_timeout
+            )
         except asyncio.TimeoutError as e:
             raise FetchTimeoutError(
                 f"Timed out fetching {url} after {self.settings.page_timeout:g} seconds in total."
             ) from e
+
+    async def fetch_json(self, url: str, *, method: str = "GET", json_body: dict | None = None) -> tuple[int, object]:
+        """Fetch a JSON API. Returns ``(status_code, data)``; data is None for non-2xx answers."""
+        res = await self.fetch(url, page=False, method=method, json_body=json_body)
+        if not 200 <= res.status_code < 300:
+            return res.status_code, None
+        try:
+            return res.status_code, json.loads(res.content.decode("utf-8-sig"))
+        except (ValueError, UnicodeDecodeError) as e:
+            raise FetchError(f"{url} did not return JSON ({res.content_type or 'unknown type'}).") from e
 
     async def check_host(self, url: str) -> None:
         """Validate the URL and run the SSRF check on its host without fetching."""
@@ -184,7 +209,7 @@ class Fetcher:
         except Exception:
             return True
 
-    async def _fetch(self, url: str, page: bool, check_robots: bool) -> FetchResult:
+    async def _fetch(self, url: str, page: bool, check_robots: bool, method: str = "GET", json_body=None) -> FetchResult:
         s = self.settings
         current = url
         redirects: list[str] = []
@@ -200,10 +225,12 @@ class Fetcher:
                     self.rate.set_interval(host, delay)
             await self.rate.wait(host)
 
-            res = await self._get(current, page)
+            res = await self._get(current, page, method, json_body)
             if res is None:
                 raise FetchError(f"Empty response from {current}.")
             if isinstance(res, str):  # redirect target
+                if method != "GET":
+                    raise FetchError(f"{current} answered a {method} request with a redirect; not followed.")
                 nxt = normalize_url(res, current)
                 if nxt is None:
                     raise InvalidURLError(f"{current} redirected to '{res}', which is not an http(s) URL.")
@@ -214,10 +241,11 @@ class Fetcher:
             return res
         raise FetchError(f"Too many redirects (more than {s.max_redirects}) starting at {url}.")
 
-    async def _get(self, url: str, page: bool) -> FetchResult | str | None:
+    async def _get(self, url: str, page: bool, method: str = "GET", json_body=None) -> FetchResult | str | None:
         s = self.settings
+        kwargs = {"json": json_body if json_body is not None else {}} if method == "POST" else {}
         try:
-            async with self._client.stream("GET", url) as resp:
+            async with self._client.stream(method, url, **kwargs) as resp:
                 if resp.status_code in _REDIRECT_CODES and resp.headers.get("location"):
                     return urljoin(url, resp.headers["location"].strip())
                 ctype_header = resp.headers.get("content-type")

@@ -35,6 +35,8 @@ class RequestInfo:
     path: str
     headers: dict[str, str]
     time: float
+    method: str = "GET"
+    body: bytes = b""
 
 
 class LocalServer:
@@ -51,8 +53,15 @@ class LocalServer:
             def log_message(self, *args):  # silence
                 pass
 
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                self._handle("POST", self.rfile.read(length) if length else b"")
+
             def do_GET(self):  # noqa: N802
-                info = RequestInfo(self.path, {k.lower(): v for k, v in self.headers.items()}, time.monotonic())
+                self._handle("GET", b"")
+
+            def _handle(self, method, body):
+                info = RequestInfo(self.path, {k.lower(): v for k, v in self.headers.items()}, time.monotonic(), method, body)
                 outer.requests.append(info)
                 route = outer.routes.get(self.path)
                 if route is None:
