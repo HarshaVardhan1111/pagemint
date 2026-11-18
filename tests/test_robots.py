@@ -136,3 +136,28 @@ async def test_crawl_delay_slows_requests(server):
         await c.scrape(server.url("/b"))
     times = [r.time for r in server.requests if r.path in ("/a", "/b")]
     assert times[1] - times[0] >= 0.35
+
+
+def test_bom_is_ignored():
+    assert rules("﻿User-agent: *\nDisallow: /\n").check("/x")[0] is False
+
+
+async def test_robots_with_bom_bytes(server, client):
+    server.route("/robots.txt", Response(b"\xef\xbb\xbfUser-agent: *\nDisallow: /\n", headers={"Content-Type": "text/plain"}))
+    server.route("/p", "<html><body>x</body></html>")
+    assert (await client.scrape(server.url("/p")))["error"]["type"] == "robots"
+
+
+async def test_cancelled_waiter_does_not_break_other_requests(server):
+    import asyncio
+
+    server.route("/robots.txt", Response("User-agent: *\nAllow: /\n", delay=0.5, headers={"Content-Type": "text/plain"}))
+    server.route("/a", "<html><body><main><p>a page</p></main></body></html>")
+    server.route("/b", "<html><body><main><p>b page</p></main></body></html>")
+    async with PageMint(make_settings()) as c:
+        ta = asyncio.create_task(c.scrape(server.url("/a")))
+        tb = asyncio.create_task(c.scrape(server.url("/b")))
+        await asyncio.sleep(0.1)
+        ta.cancel()
+        rb = await tb
+    assert "error" not in rb and "b page" in rb["content"]

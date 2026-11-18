@@ -186,3 +186,67 @@ async def test_real_browser_follows_safe_redirects(server, browser_client):
     assert r["url"] == server.url("/landing", host="localhost")
     assert "landed" in r["content"]
     assert server.hits("/final") == 1
+
+
+# ---- final-review fixes ----
+
+BUSY = "<html><body><div id='r'></div><script>window.onload = () => setTimeout(() => { while (true) {} }, 10);</script></body></html>"
+
+
+async def test_real_browser_busy_loop_times_out(server):
+    import time
+
+    server.route("/busy", BUSY)
+    async with PageMint(make_settings(page_timeout=3)) as c:
+        try:
+            await c.renderer.start()
+        except BrowserUnavailableError as e:
+            pytest.skip(e.message)
+        t0 = time.monotonic()
+        r = await c.scrape(server.url("/busy"), render_js=True)
+        assert time.monotonic() - t0 < 15
+        assert r["error"]["type"] == "timeout"
+        # The browser still works afterwards.
+        server.route("/ok", RICH)
+        assert "error" not in await c.scrape(server.url("/ok"), render_js=True)
+
+
+async def test_real_browser_blocks_private_websockets(server, monkeypatch):
+    import socket
+    import threading
+
+    real = safety.is_blocked_ip
+    monkeypatch.setattr(safety, "is_blocked_ip", lambda ip: str(ip) != "127.0.0.1" and real(ip))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+    got: list[bytes] = []
+    stop = threading.Event()
+
+    def accept():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                continue
+            got.append(conn.recv(1024))
+            conn.close()
+
+    t = threading.Thread(target=accept, daemon=True)
+    t.start()
+    server.route("/ws", f"<html><body><main><p>{'text ' * 60}</p></main><script>new WebSocket('ws://localhost:{port}/admin');</script></body></html>")
+    try:
+        async with PageMint(make_settings(allow_private_networks=False)) as c:
+            try:
+                await c.renderer.start()
+            except BrowserUnavailableError as e:
+                pytest.skip(e.message)
+            r = await c.scrape(server.url("/ws"), render_js=True)
+    finally:
+        stop.set()
+        t.join(2)
+        listener.close()
+    assert "error" not in r, r
+    assert got == []

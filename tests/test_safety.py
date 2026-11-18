@@ -178,3 +178,12 @@ async def test_unresolvable_name_allowed_only_behind_proxy():
         await safety.resolve_and_check("10.0.0.1", 80, allow_private=False, resolver=no_dns, via_proxy=True)
     with pytest.raises(safety.BlockedError):
         await safety.resolve_and_check("localhost", 80, allow_private=False, resolver=no_dns, via_proxy=True)
+
+
+@pytest.mark.parametrize("host", ["intranet", "db.internal", "printer.local", "nas.lan", "x.corp", "router.home.arpa"])
+async def test_proxy_fallback_refuses_internal_looking_names(host):
+    async def no_dns(h, port):
+        raise OSError("no dns")
+
+    with pytest.raises(safety.BlockedError):
+        await safety.resolve_and_check(host, 80, allow_private=False, resolver=no_dns, via_proxy=True)

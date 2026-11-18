@@ -69,3 +69,29 @@ async def test_map_ignores_other_hosts_in_sitemap(server, client):
     server.route("/sitemap.xml", Response(urlset([server.url("/a"), "http://other.example/b"]), headers=XML))
     r = await client.map_site(server.url("/"), limit=1)
     assert r["urls"] == [server.url("/a")]
+
+
+async def test_map_has_time_budget(server):
+    import time
+
+    from conftest import make_settings
+    from pagemint.client import PageMint
+
+    kids = "".join(f"<sitemap><loc>{server.url(f'/s{i}.xml')}</loc></sitemap>" for i in range(5))
+    server.route("/sitemap.xml", Response(f'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{kids}</sitemapindex>', headers=XML))
+    for i in range(5):
+        server.route(f"/s{i}.xml", Response(urlset([server.url(f"/p{i}")]), headers=XML, delay=0.4))
+    async with PageMint(make_settings(crawl_time_budget=0.6)) as c:
+        t0 = time.monotonic()
+        r = await c.map_site(server.url("/"))
+    assert time.monotonic() - t0 < 1.5
+    assert any("time" in w for w in r["warnings"])
+
+
+async def test_map_off_site_child_sitemap_respects_that_sites_robots(server, client):
+    server.route("/robots.txt", Response("User-agent: *\nDisallow: /private-maps/\n", headers={"Content-Type": "text/plain"}))
+    child = server.url("/private-maps/s.xml", host="localhost")  # a different host
+    server.route("/sitemap.xml", Response(f'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>{child}</loc></sitemap></sitemapindex>', headers=XML))
+    server.route("/private-maps/s.xml", Response(urlset([server.url("/x")]), headers=XML))
+    await client.map_site(server.url("/"))
+    assert server.hits("/private-maps/s.xml") == 0

@@ -100,7 +100,7 @@ def parse_robots(text: str) -> RobotsFile:
     out = RobotsFile()
     current: _Group | None = None
     last_was_agent = False
-    for raw_line in text.splitlines():
+    for raw_line in text.lstrip("\ufeff").splitlines():
         line = raw_line.split("#", 1)[0].strip()
         if not line or ":" not in line:
             continue
@@ -172,7 +172,7 @@ class RobotsCache:
             msg = f"robots.txt at {robots_url} could not be fetched ({e.message})"
             return _Entry(ALLOW_ALL, [], msg, retry, unreachable=isinstance(e, FetchError))
         if 200 <= res.status_code < 300:
-            f = parse_robots(res.content.decode("utf-8", errors="replace"))
+            f = parse_robots(res.content.decode("utf-8-sig", errors="replace"))
             return _Entry(f.rules_for(self.user_agent), f.sitemaps, None, expires)
         if 400 <= res.status_code < 500:
             return _Entry(ALLOW_ALL, [], None, expires)  # no robots.txt: everything allowed
@@ -183,19 +183,23 @@ class RobotsCache:
         e = self._cache.get(origin)
         if e is not None and e.expires > time.monotonic():
             return e
-        fut = self._pending.get(origin)
-        if fut is None:
-            fut = asyncio.ensure_future(self._load(origin))
-            self._pending[origin] = fut
-            try:
-                e = await fut
-            finally:
-                self._pending.pop(origin, None)
-            if len(self._cache) >= self.max_entries:
-                self._cache.pop(next(iter(self._cache)))
-            self._cache[origin] = e
-            return e
-        return await fut
+        task = self._pending.get(origin)
+        if task is None:
+            # The cache owns the load; callers only wait on it. A caller being
+            # cancelled (e.g. its page timed out) must not cancel the load for
+            # other requests waiting on the same site.
+            task = asyncio.ensure_future(self._load(origin))
+            self._pending[origin] = task
+            task.add_done_callback(lambda t, o=origin: self._finish(o, t))
+        return await asyncio.shield(task)
+
+    def _finish(self, origin: str, task: "asyncio.Future[_Entry]") -> None:
+        self._pending.pop(origin, None)
+        if task.cancelled() or task.exception() is not None:
+            return
+        if len(self._cache) >= self.max_entries:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[origin] = task.result()
 
     async def allowed(self, url: str) -> tuple[bool, str]:
         """Return ``(allowed, reason)``. The reason explains a refusal."""

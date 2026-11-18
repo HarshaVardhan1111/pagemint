@@ -78,3 +78,17 @@ async def test_scrape_plain_text(server, client):
     server.route("/notes.txt", Response("just some text", headers={"Content-Type": "text/plain"}))
     r = await client.scrape(server.url("/notes.txt"))
     assert r["content"].strip() == "just some text"
+
+
+async def test_decodes_cp1252_without_any_charset(server, client):
+    html = "<html><body><main><p>Café naïve “quotes”</p></main></body></html>"
+    server.route("/x", Response(html.encode("cp1252"), headers={"Content-Type": "text/html"}))
+    r = await client.scrape(server.url("/x"))
+    assert "Café naïve “quotes”" in r["content"]
+
+
+async def test_latin1_header_is_treated_as_cp1252(server, client):
+    html = "<html><body><main><p>It’s “smart” — yes</p></main></body></html>"
+    server.route("/x", Response(html.encode("cp1252"), headers={"Content-Type": "text/html; charset=iso-8859-1"}))
+    r = await client.scrape(server.url("/x"))
+    assert "It’s “smart” — yes" in r["content"]

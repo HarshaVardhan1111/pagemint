@@ -14,6 +14,7 @@ from pagemint.config import MAX_CRAWL_DEPTH, MAX_CRAWL_PAGES, MAX_MAP_LIMIT, Set
 from pagemint.browser import BrowserRenderer
 from pagemint.errors import (
     BrowserUnavailableError,
+    FetchTimeoutError,
     InvalidArgumentError,
     InvalidURLError,
     PageMintError,
@@ -38,6 +39,7 @@ _SKIP_EXT_RE = re.compile(
     re.I,
 )
 MAX_SITEMAP_FILES = 50
+RENDER_GRACE = 5.0  # seconds on top of page_timeout for the whole browser render
 MAX_SITEMAP_NESTING = 3
 
 
@@ -99,8 +101,13 @@ class PageMint:
         # The first URL gets the same checks as a plain fetch, with clear errors.
         await self.fetcher.check_host(url)
         await self.fetcher.check_allowed(url)
+        limit = self.settings.page_timeout + RENDER_GRACE
         try:
-            return await self.renderer.render(url)
+            return await asyncio.wait_for(self.renderer.render(url), timeout=limit)
+        except asyncio.TimeoutError as e:
+            raise FetchTimeoutError(
+                f"Timed out rendering {url} in the browser after {limit:g} seconds (the page kept the browser busy)."
+            ) from e
         except BrowserUnavailableError as e:
             raise BrowserUnavailableError(f"{BrowserRenderer.install_hint()} ({e.message})" if "playwright install" not in e.message else e.message) from e
 
@@ -277,13 +284,27 @@ class PageMint:
         sitemaps = robots_maps or [f"{parts.scheme}://{parts.netloc}/sitemap.xml"]
         todo: deque[tuple[str, int]] = deque((u, 0) for u in sitemaps)
         visited: set[str] = set()
+        deadline = time.monotonic() + self.settings.crawl_time_budget
+        out_of_time = False
         while todo and len(found) < limit and len(visited) < MAX_SITEMAP_FILES:
             sm, level = todo.popleft()
-            if sm in visited:
+            sm = normalize_url(sm) or ""
+            if not sm or sm in visited:
                 continue
             visited.add(sm)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                out_of_time = True
+                break
             try:
-                res = await self.fetcher.fetch(sm, page=False, check_robots=False)
+                # The site's own sitemaps are meant for crawlers; a sitemap on
+                # another host is only read if that host's robots.txt allows it.
+                res = await asyncio.wait_for(
+                    self.fetcher.fetch(sm, page=False, check_robots=not same_site(sm, start)), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                out_of_time = True
+                break
             except PageMintError as e:
                 warnings.append(f"Could not read sitemap {sm}: {e.message}")
                 continue
@@ -296,9 +317,15 @@ class PageMint:
                 todo.extend((c, level + 1) for c in children)
         from_sitemap = len(found)
 
+        if out_of_time:
+            warnings.append(
+                f"Stopped reading sitemaps after the time limit of {self.settings.crawl_time_budget:g} seconds; "
+                "returning the URLs found so far."
+            )
+
         # 2. Links on the start page, if the sitemap did not fill the limit.
         from_links = 0
-        if len(found) < limit:
+        if len(found) < limit and not out_of_time:
             try:
                 page = await self._get_page(start, "links", False)
                 before = len(found)

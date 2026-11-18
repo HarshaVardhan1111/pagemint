@@ -14,6 +14,8 @@ Resolver = Callable[[str, int], Awaitable[list[str]]]
 
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 _BLOCKED_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+# Names that are only meaningful inside a private network.
+_INTERNAL_SUFFIXES = (".internal", ".local", ".lan", ".corp", ".home.arpa", ".intranet", ".private", ".localdomain")
 
 __all__ = ["BlockedError", "FetchError", "is_blocked_ip", "validate_url", "resolve_and_check", "system_resolver"]
 
@@ -81,6 +83,11 @@ async def resolve_and_check(
             addrs = await resolver(host, port)
         except (OSError, UnicodeError) as e:
             if via_proxy:
+                if not allow_private and ("." not in host or host.endswith(_INTERNAL_SUFFIXES)):
+                    raise BlockedError(
+                        f"Blocked '{host}': it looks like an internal network name and cannot be checked "
+                        "(set PAGEMINT_ALLOW_PRIVATE=1 to allow this on purpose)."
+                    ) from e
                 return []
             raise FetchError(f"Could not resolve host '{host}': {e}.") from e
     if not addrs:

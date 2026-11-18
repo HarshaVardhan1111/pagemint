@@ -70,7 +70,8 @@ class BrowserRenderer:
                 raise BrowserUnavailableError(self.install_hint()) from e
             try:
                 self._pw = await async_playwright().start()
-                kwargs: dict = {"headless": True}
+                # No WebRTC traffic outside the proxy (it could reach local addresses).
+                kwargs: dict = {"headless": True, "args": ["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]}
                 if self.settings.browser_executable:
                     kwargs["executable_path"] = self.settings.browser_executable
                 proxy = self._proxy()
@@ -156,6 +157,20 @@ class BrowserRenderer:
                 log.debug("browser request failed %s: %s", req_url, e)
                 await _safe_abort(route)
 
+        async def handle_ws(ws_route):
+            # page.route does not see WebSockets; check them here.
+            try:
+                await self.fetcher.check_host(ws_route.url.replace("ws://", "http://", 1).replace("wss://", "https://", 1))
+            except Exception as e:
+                blocked.append(f"{ws_route.url}: {getattr(e, 'message', e)}")
+                try:
+                    await ws_route.close()
+                except Exception:
+                    pass
+                return
+            ws_route.connect_to_server()
+
+        await context.route_web_socket("**/*", handle_ws)
         await page.route("**/*", handle)
         try:
             target = url

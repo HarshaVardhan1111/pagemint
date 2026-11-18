@@ -53,24 +53,33 @@ def media_type(content_type_header: str | None) -> str:
     return (content_type_header or "").split(";", 1)[0].strip().lower()
 
 
+# Browsers decode these labels as windows-1252 (WHATWG Encoding Standard).
+_CP1252_ALIASES = {"iso-8859-1", "iso8859-1", "latin1", "latin-1", "l1", "us-ascii", "ascii", "windows-1252", "cp1252"}
+
+
+def _label(enc: str) -> str:
+    enc = enc.strip().lower()
+    return "cp1252" if enc in _CP1252_ALIASES else enc
+
+
 def decode_body(content: bytes, content_type_header: str | None) -> str:
-    """Decode using the header charset, then <meta charset>, then UTF-8."""
+    """Decode like a browser: BOM, header charset, <meta charset>, UTF-8, then windows-1252."""
+    if content.startswith(b"\xef\xbb\xbf"):
+        return content[3:].decode("utf-8", errors="replace")
     candidates: list[str] = []
     m = re.search(r"charset\s*=\s*[\"']?([\w.:-]+)", content_type_header or "", re.I)
     if m:
-        candidates.append(m.group(1))
+        candidates.append(_label(m.group(1)))
     m2 = _META_CHARSET_RE.search(content[:4096])
     if m2:
-        candidates.append(m2.group(1).decode("ascii", "ignore"))
-    if content.startswith(b"\xef\xbb\xbf"):
-        candidates.insert(0, "utf-8-sig")
+        candidates.append(_label(m2.group(1).decode("ascii", "ignore")))
     candidates.append("utf-8")
     for enc in candidates:
         try:
             return content.decode(enc)
         except (LookupError, UnicodeDecodeError):
             continue
-    return content.decode("utf-8", errors="replace")
+    return content.decode("cp1252", errors="replace")
 
 
 class GuardedBackend(httpcore.AsyncNetworkBackend):
