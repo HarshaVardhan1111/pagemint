@@ -14,7 +14,17 @@ def _server():
 async def test_mcp_tools_registered():
     async with Client(_server()) as c:
         names = {t.name for t in (await c.list_tools()).tools}
-    assert {"scrape"} <= names
+    assert {"scrape", "crawl", "map"} <= names
+
+
+async def test_mcp_crawl_and_map(server):
+    server.route("/", "<html><body><main><p>Home page text</p><a href='/a'>a</a></main></body></html>")
+    server.route("/a", "<html><body><main><p>Page A text</p></main></body></html>")
+    async with Client(_server()) as c:
+        cr = json.loads((await c.call_tool("crawl", {"url": server.url("/"), "max_pages": 2})).content[0].text)
+        mp = json.loads((await c.call_tool("map", {"url": server.url("/")})).content[0].text)
+    assert len(cr["pages"]) == 2
+    assert server.url("/a") in mp["urls"]
 
 
 async def test_mcp_scrape_returns_result(server):

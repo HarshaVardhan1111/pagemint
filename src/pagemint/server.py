@@ -7,7 +7,7 @@ import logging
 import sys
 from typing import Callable, Literal
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp_types import CallToolResult, TextContent
 
 from pagemint import __version__
@@ -51,6 +51,41 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer
         that need JavaScript (needs the optional browser install).
         """
         return _result(await client().scrape(url, format=format, render_js=render_js))
+
+    @server.tool()
+    async def crawl(
+        url: str,
+        max_pages: int = 20,
+        max_depth: int = 2,
+        same_domain: bool = True,
+        render_js: bool = False,
+        ctx: Context | None = None,
+    ) -> CallToolResult:
+        """Crawl a site starting at url and return each page as Markdown.
+
+        Follows links breadth-first up to max_depth link hops (limit 5) and max_pages pages (limit 100).
+        same_domain=True stays on the starting host. Skipped URLs (robots.txt, blocked, errors) are listed
+        with the reason. Long crawls stop at a time/size budget and return the pages collected so far.
+        """
+
+        async def progress(done: int, total: int, page_url: str) -> None:
+            if ctx is not None:
+                await ctx.report_progress(done, total, f"Crawled {page_url}")
+
+        return _result(
+            await client().crawl(
+                url, max_pages=max_pages, max_depth=max_depth, same_domain=same_domain,
+                render_js=render_js, on_progress=progress,
+            )
+        )
+
+    @server.tool(name="map")
+    async def map_site(url: str, limit: int = 500) -> CallToolResult:
+        """List URLs on a website (sitemap.xml first, then links on the start page).
+
+        Returns up to limit URLs (maximum 5000) on the same host, without fetching each page.
+        """
+        return _result(await client().map_site(url, limit=limit))
 
     server._pagemint_holder = holder  # type: ignore[attr-defined]
     return server
