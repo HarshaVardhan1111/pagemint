@@ -5,6 +5,7 @@ No test touches the live internet. Everything runs against 127.0.0.1.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -123,7 +124,12 @@ def server():
 
 
 def make_settings(**overrides) -> Settings:
-    base = dict(allow_private_networks=True, rate_limit=0.0)
+    base = dict(
+        allow_private_networks=True,
+        rate_limit=0.0,
+        js_fallback_chars=0,  # no automatic browser in tests unless a test asks for it
+        browser_executable=os.environ.get("PAGEMINT_BROWSER_EXECUTABLE", ""),
+    )
     base.update(overrides)
     return Settings(**base)
 

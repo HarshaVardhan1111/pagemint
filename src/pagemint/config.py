@@ -31,6 +31,7 @@ class Settings:
     page_char_cap: int = 20_000
     result_char_cap: int = 300_000
     robots_cache_ttl: float = 3600.0
+    browser_executable: str = ""  # optional path to a Chrome/Chromium binary
     # Internal switch for tests; deliberately not settable from the environment.
     respect_robots: bool = field(default=True)
 

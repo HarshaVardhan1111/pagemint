@@ -11,7 +11,14 @@ from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from pagemint.config import MAX_CRAWL_DEPTH, MAX_CRAWL_PAGES, MAX_MAP_LIMIT, Settings
-from pagemint.errors import InvalidArgumentError, InvalidURLError, PageMintError, error_dict
+from pagemint.browser import BrowserRenderer
+from pagemint.errors import (
+    BrowserUnavailableError,
+    InvalidArgumentError,
+    InvalidURLError,
+    PageMintError,
+    error_dict,
+)
 from pagemint.extract import extract_main
 from pagemint.fetcher import Fetcher, FetchResult
 from pagemint.links import links_from_doc, normalize_url, same_site
@@ -39,9 +46,10 @@ def _looks_like_file(url: str) -> bool:
 
 
 class PageMint:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, renderer=None):
         self.settings = settings or Settings.from_env()
         self.fetcher = Fetcher(self.settings)
+        self.renderer = renderer or BrowserRenderer(self.settings, self.fetcher)
 
     async def __aenter__(self) -> "PageMint":
         return self
@@ -50,7 +58,10 @@ class PageMint:
         await self.aclose()
 
     async def aclose(self) -> None:
-        await self.fetcher.aclose()
+        try:
+            await self.renderer.aclose()
+        finally:
+            await self.fetcher.aclose()
 
     # ---- helpers -------------------------------------------------------
 
@@ -84,10 +95,44 @@ class PageMint:
             "links": links, "rendered_js": False, "warnings": warnings, "_text_len": ex.text_len,
         }
 
+    async def _render(self, url: str) -> FetchResult:
+        # The first URL gets the same checks as a plain fetch, with clear errors.
+        await self.fetcher.check_host(url)
+        await self.fetcher.check_allowed(url)
+        try:
+            return await self.renderer.render(url)
+        except BrowserUnavailableError as e:
+            raise BrowserUnavailableError(f"{BrowserRenderer.install_hint()} ({e.message})" if "playwright install" not in e.message else e.message) from e
+
     async def _get_page(self, url: str, format: str, render_js: bool) -> dict:
-        """Fetch and convert one page. Raises PageMintError on failure."""
+        """Fetch and convert one page. Raises PageMintError on failure.
+
+        With ``render_js`` the page is loaded in the browser. Otherwise a plain
+        fetch is tried first and, if it yields almost no text, the browser is
+        tried automatically (when installed).
+        """
+        if render_js:
+            page = self._build_page(await self._render(url), format)
+            page["rendered_js"] = True
+            return page
         res = await self.fetcher.fetch(url)
-        return self._build_page(res, format)
+        page = self._build_page(res, format)
+        if not (res.is_html and 200 <= res.status_code < 300 and page["_text_len"] < self.settings.js_fallback_chars):
+            return page
+        try:
+            rendered = self._build_page(await self._render(res.url), format)
+        except BrowserUnavailableError:
+            page["warnings"].append(
+                "This page has almost no text without JavaScript. " + BrowserRenderer.install_hint()
+            )
+            return page
+        except PageMintError as e:
+            page["warnings"].append(f"JavaScript rendering was tried and failed: {e.message}")
+            return page
+        if rendered["_text_len"] > page["_text_len"]:
+            rendered["rendered_js"] = True
+            return rendered
+        return page
 
     # ---- operations ----------------------------------------------------
 
