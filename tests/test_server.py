@@ -58,5 +58,15 @@ async def test_stdio_server_end_to_end(server):
     async with Client(params) as c:
         names = {t.name for t in (await c.list_tools()).tools}
         res = await c.call_tool("scrape", {"url": server.url("/")})
-    assert names == {"scrape", "crawl", "map"}
+    assert {"scrape", "crawl", "map"} <= names
     assert json.loads(res.content[0].text)["title"] == "E2E"
+
+
+async def test_mcp_job_tools(server, tmp_path, monkeypatch):
+    monkeypatch.setenv("PAGEMINT_DATA_DIR", str(tmp_path))
+    async with Client(_server()) as c:
+        names = {t.name for t in (await c.list_tools()).tools}
+        res = await c.call_tool("saved_companies", {"action": "list"})
+    assert {"search_jobs", "company_jobs", "check_job", "saved_companies"} <= names
+    assert json.loads(res.content[0].text)["count"] == 0
+    assert (tmp_path / "jobs.sqlite3").exists()

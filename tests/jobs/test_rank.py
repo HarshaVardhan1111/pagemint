@@ -84,3 +84,12 @@ def test_to_dict_snippet_and_full():
     full = j.to_dict(snippet=False)
     assert "word word" in full["description"] and len(full["description"]) <= 20_000
     assert {"title", "company", "url", "source", "status", "salary", "remote"} <= set(short)
+
+
+def test_remote_job_limited_to_a_place_must_match_location():
+    jobs = [J("A", location="Remote - US", remote=True), J("B", location="Remote (worldwide)", remote=True),
+            J("C", location="Remote", remote=True), J("D", location="Remote-Friendly, United States", remote=True),
+            J("E", location="Remote, UK", remote=True)]
+    assert titles(filter_and_rank(jobs, location="London", today=TODAY)) == ["B", "C"]
+    assert set(titles(filter_and_rank(jobs, location="UK", today=TODAY))) == {"B", "C", "E"}
+    assert set(titles(filter_and_rank(jobs, location="USA", today=TODAY))) == {"A", "B", "C", "D"}

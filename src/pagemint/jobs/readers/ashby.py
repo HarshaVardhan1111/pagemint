@@ -12,6 +12,16 @@ SOURCE = "ashby"
 _WORKPLACE = {"remote": "remote", "hybrid": "hybrid", "onsite": "onsite", "on-site": "onsite"}
 
 
+def _remote(raw: dict) -> bool | None:
+    # Ashby sets isRemote on hybrid jobs too, so the workplace type wins when present.
+    wp = _WORKPLACE.get((raw.get("workplaceType") or "").lower())
+    if wp == "remote":
+        return True
+    if wp in ("hybrid", "onsite"):
+        return False
+    return raw.get("isRemote") if isinstance(raw.get("isRemote"), bool) else None
+
+
 def to_job(raw: dict, board: str) -> Job:
     location = raw.get("location") or ""
     secondary = []
@@ -28,7 +38,7 @@ def to_job(raw: dict, board: str) -> Job:
         source=SOURCE,
         location=location,
         locations=([location] if location else []) + secondary,
-        remote=raw.get("isRemote") if isinstance(raw.get("isRemote"), bool) else None,
+        remote=_remote(raw),
         workplace_type=_WORKPLACE.get((raw.get("workplaceType") or "").lower()),
         employment_type=raw.get("employmentType"),
         department=raw.get("department") or raw.get("team"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Callable, Literal
 
@@ -11,6 +12,8 @@ from mcp_types import CallToolResult, TextContent
 
 from pagemint import __version__
 from pagemint.client import PageMint
+from pagemint.jobs.service import JobService
+from pagemint.jobs.store import JobStore, default_data_dir
 
 INSTRUCTIONS = (
     "PageMint turns web pages into clean Markdown. Use `scrape` for one page, `crawl` to read several "
@@ -36,6 +39,9 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer
         try:
             yield {}
         finally:  # close HTTP connections and the browser on shutdown
+            jobs = holder.pop("jobs", None)
+            if jobs is not None:
+                jobs.store.close()
             c = holder.pop("c", None)
             if c is not None:
                 await c.aclose()
@@ -46,6 +52,13 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer
         if "c" not in holder:
             holder["c"] = client_factory()
         return holder["c"]
+
+    def jobs() -> JobService:
+        if "jobs" not in holder:
+            c = client()
+            folder = Path(c.settings.data_dir) if c.settings.data_dir else default_data_dir()
+            holder["jobs"] = JobService(c, JobStore(str(folder / "jobs.sqlite3")))
+        return holder["jobs"]
 
     @server.tool()
     async def scrape(
@@ -95,5 +108,51 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer
         Returns up to limit URLs (maximum 5000) on the same host, without fetching each page.
         """
         return _result(await client().map_site(url, limit=limit))
+
+    @server.tool()
+    async def search_jobs(
+        query: str,
+        location: str = "",
+        remote: bool | None = None,
+        posted_within_days: int | None = None,
+        companies: list[str] | None = None,
+        sources: Literal["all", "companies"] = "all",
+        limit: int = 25,
+    ) -> CallToolResult:
+        """Search open jobs, best matches first.
+
+        Searches your saved companies' hiring systems (or the `companies` given: names or careers-page URLs)
+        plus free job sources (Hacker News "Who is hiring?", Arbeitnow, Himalayas) when sources="all".
+        remote=True: remote only; False: no remote; null: either. Jobs from company hiring systems are
+        "open"; jobs from free sources are "unverified" (use check_job). Max 100 results.
+        """
+        return _result(await jobs().search_jobs(
+            query, location=location, remote=remote, posted_within_days=posted_within_days,
+            companies=companies, sources=sources, limit=limit,
+        ))
+
+    @server.tool()
+    async def company_jobs(
+        company: str, query: str = "", location: str = "", remote: bool | None = None, limit: int = 50
+    ) -> CallToolResult:
+        """Open jobs at one company, straight from its hiring system.
+
+        company: a name (e.g. "Stripe") or a careers-page / job-board URL. PageMint finds the hiring system
+        (Greenhouse, Lever, Ashby, Workday, Recruitee, or job data on any careers page) and adds the company
+        to your saved list for search_jobs. Workday companies need the careers URL.
+        """
+        return _result(await jobs().company_jobs(company, query=query, location=location, remote=remote, limit=limit))
+
+    @server.tool()
+    async def check_job(url: str) -> CallToolResult:
+        """Check whether a job link is still open. Returns status open, closed or unknown, the reason,
+        and the full job description when it is open."""
+        return _result(await jobs().check_job(url))
+
+    @server.tool()
+    async def saved_companies(action: Literal["list", "add", "remove"] = "list", company: str | None = None) -> CallToolResult:
+        """List, add or remove companies in your saved list (used by search_jobs). The list is stored
+        only on this computer."""
+        return _result(await jobs().saved_companies(action, company))
 
     return server

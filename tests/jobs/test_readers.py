@@ -130,3 +130,10 @@ async def test_recruitee_list(base, client):
     j = jobs[0]
     assert (j.title, j.remote, j.department, j.posted_at) == ("Frontend Developer", True, "Product", "2026-11-12")
     assert j.url == "https://acme.recruitee.com/o/frontend-developer"
+
+
+async def test_ashby_workplace_type_beats_is_remote(base, client):
+    raw = dict(ASHBY["jobs"][0], isRemote=True, workplaceType="Hybrid")
+    base.route("/posting-api/job-board/acme", Response(js({"jobs": [raw]}), headers=JSON))
+    [j], _ = await ashby.list_jobs(client, Board("ashby", "acme"))
+    assert j.remote is False and j.workplace_type == "hybrid"

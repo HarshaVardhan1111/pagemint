@@ -32,6 +32,9 @@ class Settings:
     result_char_cap: int = 300_000
     robots_cache_ttl: float = 3600.0
     browser_executable: str = ""  # optional path to a Chrome/Chromium binary
+    jobs_cache_hours: float = 6.0
+    jobs_search_budget: float = 60.0
+    data_dir: str = ""  # folder for the saved company list (default: the user's data folder)
     # Internal switch for tests; deliberately not settable from the environment.
     respect_robots: bool = field(default=True)
 

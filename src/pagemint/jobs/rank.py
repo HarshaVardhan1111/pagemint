@@ -57,6 +57,19 @@ def _matches_location(job: Job, wanted: set[str]) -> bool:
     return False
 
 
+_ANYWHERE_RE = re.compile(
+    r"\b(remote|anywhere|worldwide|world-wide|global|globally|friendly|first|fully|work from home|wfh|"
+    r"distributed|any|location|timezone|time zone|ok|only)\b|[^a-z]+",
+    re.I,
+)
+
+
+def _unrestricted_remote(job: Job) -> bool:
+    """A remote job that names no particular place (e.g. 'Remote', 'Remote (worldwide)')."""
+    places = [job.location or "", *job.locations]
+    return all(not _ANYWHERE_RE.sub("", p.lower()).strip() for p in places)
+
+
 def score(job: Job, query_terms: list[str], phrase: str, today: date) -> float:
     s = 0.0
     if query_terms:
@@ -107,7 +120,8 @@ def filter_and_rank(
         if remote is False and job.remote is True:
             continue
         if wanted is not None and not _matches_location(job, wanted):
-            if not (job.remote is True and remote is not False):
+            # A remote job matches any location only when it is not limited to a place.
+            if not (job.remote is True and remote is not False and _unrestricted_remote(job)):
                 continue
         if cutoff is not None:
             if not job.posted_at or job.posted_at < cutoff.isoformat():
