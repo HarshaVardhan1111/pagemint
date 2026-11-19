@@ -327,7 +327,7 @@ pytest
 
 ## Releasing (maintainers)
 
-Publishing a GitHub release (Releases → Draft a new release, with a new tag like `v0.1.0` on `main`) builds the package and publishes it to PyPI through [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API token is stored anywhere. One-time setup on pypi.org: create a free account, then under **Publishing** add a pending publisher with owner `HarshaVardhan1111`, repository `pagemint`, workflow `release.yml` and environment `pypi`.
+Publishing a GitHub release (Releases → Draft a new release, with a new tag like `v0.1.0` on `main`) builds the package, publishes it to PyPI through [trusted publishing](https://docs.pypi.org/trusted-publishers/), and then updates the [MCP Registry](https://registry.modelcontextprotocol.io) entry from `server.json` using GitHub's OIDC login, so no API token is stored anywhere. One-time setup on pypi.org: create a free account, then under **Publishing** add a pending publisher with owner `HarshaVardhan1111`, repository `pagemint`, workflow `release.yml` and environment `pypi`.
 
 ## License
 

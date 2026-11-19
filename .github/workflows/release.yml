@@ -37,3 +37,28 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  registry:
+    # List (or update) PageMint in the official MCP Registry once the PyPI upload is done.
+    # GitHub's OIDC token proves the release comes from this repository: no secrets needed.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher (official MCP Registry CLI)
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher --help > /dev/null
+      - name: Log in with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server.json (retries while PyPI makes the new version visible)
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if ./mcp-publisher publish; then exit 0; fi
+            echo "Attempt $attempt failed; waiting 30 s for PyPI to show the new version..."
+            sleep 30
+          done
+          exit 1
