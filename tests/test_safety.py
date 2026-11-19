@@ -242,3 +242,41 @@ async def test_rate_limit_wait_does_not_count_against_page_timeout(server):
     async with PageMint(make_settings(rate_limit=0.5, page_timeout=1.0)) as c:
         results = await _asyncio.gather(*(c.scrape(server.url(f"/q{i}")) for i in range(4)))
     assert all("error" not in r for r in results), [r.get("error") for r in results]
+
+
+async def test_custom_headers_sent(server, client):
+    server.route("/h", Response("{}", headers={"Content-Type": "application/json"}))
+    await client.fetcher.fetch_json(server.url("/h"), headers={"X-Test-Token": "abc"})
+    assert [r for r in server.requests if r.path == "/h"][0].headers["x-test-token"] == "abc"
+
+
+async def test_no_redirect_mode_raises_and_target_not_hit(server, client):
+    from pagemint.errors import FetchError
+
+    server.route("/r", Response(b"", status=302, headers={"Location": "/target"}))
+    server.route("/target", Response("{}", headers={"Content-Type": "application/json"}))
+    with pytest.raises(FetchError, match="redirect"):
+        await client.fetcher.fetch_json(server.url("/r"), headers={"X-Key": "secret"}, follow_redirects=False)
+    assert server.hits("/target") == 0
+
+
+async def test_private_origin_allowed_only_inside_context(server, strict):
+    from pagemint.errors import BlockedError
+
+    server.route("/x", Response('{"ok": 1}', headers={"Content-Type": "application/json"}))
+    url = server.url("/x")
+    with pytest.raises(BlockedError):
+        await strict.fetcher.fetch_json(url, check_robots=False)
+    with safety.private_origin_allowed(("http", "127.0.0.1", server.port)):
+        assert (await strict.fetcher.fetch_json(url, check_robots=False))[1] == {"ok": 1}
+        with pytest.raises(BlockedError):
+            await strict.fetcher.fetch_json(server.url("/x", host="localhost"), check_robots=False)
+        with pytest.raises(BlockedError):
+            await strict.fetcher.fetch_json(f"http://127.0.0.1:{server.port + 1}/x", check_robots=False)
+    with pytest.raises(BlockedError):
+        await strict.fetcher.fetch_json(url, check_robots=False)
+
+
+def test_origin_of():
+    assert safety.origin_of("http://LocalHost:8888/search") == ("http", "localhost", 8888)
+    assert safety.origin_of("https://x.example") == ("https", "x.example", 443)

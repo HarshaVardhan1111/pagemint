@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import ipaddress
 import socket
 from typing import Awaitable, Callable
@@ -17,7 +19,37 @@ _BLOCKED_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-lo
 # Names that are only meaningful inside a private network.
 _INTERNAL_SUFFIXES = (".internal", ".local", ".lan", ".corp", ".home.arpa", ".intranet", ".private", ".localdomain")
 
-__all__ = ["BlockedError", "FetchError", "is_blocked_ip", "validate_url", "resolve_and_check", "system_resolver"]
+# The one private origin a caller may reach, set only around a specific call
+# (the user's own SearXNG). Context-local, so concurrent requests are unaffected.
+_ALLOWED_ORIGIN: contextvars.ContextVar[tuple[str, str, int] | None] = contextvars.ContextVar(
+    "pagemint_private_origin", default=None
+)
+
+
+def origin_of(url: str) -> tuple[str, str, int]:
+    scheme, host, port = validate_url(url)
+    return scheme, host, port
+
+
+@contextlib.contextmanager
+def private_origin_allowed(origin: tuple[str, str, int]):
+    """Allow private addresses for exactly this (scheme, host, port) inside the block."""
+    token = _ALLOWED_ORIGIN.set((origin[0], origin[1].strip("[]").lower(), int(origin[2])))
+    try:
+        yield
+    finally:
+        _ALLOWED_ORIGIN.reset(token)
+
+
+def _origin_exempt(host: str, port: int) -> bool:
+    allowed = _ALLOWED_ORIGIN.get()
+    return allowed is not None and allowed[1] == host and allowed[2] == int(port)
+
+
+__all__ = [
+    "BlockedError", "FetchError", "is_blocked_ip", "validate_url", "resolve_and_check", "system_resolver",
+    "origin_of", "private_origin_allowed",
+]
 
 
 def is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -71,6 +103,8 @@ async def resolve_and_check(
     """
     resolver = resolver or system_resolver
     host = host.strip("[]").rstrip(".").lower()
+    if not allow_private and _origin_exempt(host, port):
+        allow_private = True
     if not allow_private and (host in _BLOCKED_NAMES or host.endswith(".localhost")):
         raise BlockedError(
             f"Blocked '{host}': PageMint does not fetch localhost or private network addresses "

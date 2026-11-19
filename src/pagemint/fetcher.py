@@ -151,6 +151,8 @@ class Fetcher:
         method: str = "GET",
         json_body: dict | None = None,
         max_bytes: int | None = None,
+        headers: dict | None = None,
+        follow_redirects: bool = True,
     ) -> FetchResult:
         """Fetch ``url`` safely, following redirects (each hop re-checked).
 
@@ -163,16 +165,27 @@ class Fetcher:
             raise ValueError(f"unsupported method {method}")
         # The page timeout starts once the rate limiter lets the first request go,
         # so waiting in line behind other requests to the same site does not count.
-        return await self._fetch(url, page, check_robots, method, json_body, max_bytes)
+        return await self._fetch(url, page, check_robots, method, json_body, max_bytes, headers, follow_redirects)
 
     async def fetch_json(
-        self, url: str, *, method: str = "GET", json_body: dict | None = None, max_bytes: int | None = None
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        json_body: dict | None = None,
+        max_bytes: int | None = None,
+        headers: dict | None = None,
+        follow_redirects: bool = True,
+        check_robots: bool = True,
     ) -> tuple[int, object]:
         """Fetch a JSON API. Returns ``(status_code, data)``; data is None for non-2xx answers.
 
         ``max_bytes`` overrides the page size limit for this call (job feeds can be large).
         """
-        res = await self.fetch(url, page=False, method=method, json_body=json_body, max_bytes=max_bytes)
+        res = await self.fetch(
+            url, page=False, method=method, json_body=json_body, max_bytes=max_bytes, headers=headers,
+            follow_redirects=follow_redirects, check_robots=check_robots,
+        )
         if not 200 <= res.status_code < 300:
             return res.status_code, None
         try:
@@ -212,7 +225,8 @@ class Fetcher:
             return True
 
     async def _fetch(
-        self, url: str, page: bool, check_robots: bool, method: str = "GET", json_body=None, max_bytes: int | None = None
+        self, url: str, page: bool, check_robots: bool, method: str = "GET", json_body=None,
+        max_bytes: int | None = None, headers: dict | None = None, follow_redirects: bool = True,
     ) -> FetchResult:
         s = self.settings
         current = url
@@ -236,13 +250,15 @@ class Fetcher:
                 if remaining <= 0:
                     raise asyncio.TimeoutError
                 res = await asyncio.wait_for(
-                    self._get(current, page, method, json_body, max_bytes or s.max_bytes), timeout=remaining
+                    self._get(current, page, method, json_body, max_bytes or s.max_bytes, headers), timeout=remaining
                 )
             except asyncio.TimeoutError as e:
                 raise FetchTimeoutError(f"Timed out fetching {url} after {s.page_timeout:g} seconds in total.") from e
             if res is None:
                 raise FetchError(f"Empty response from {current}.")
             if isinstance(res, str):  # redirect target
+                if not follow_redirects:
+                    raise FetchError(f"{current} answered with a redirect; not followed for this request.")
                 if method != "GET":
                     raise FetchError(f"{current} answered a {method} request with a redirect; not followed.")
                 nxt = normalize_url(res, current)
@@ -256,11 +272,14 @@ class Fetcher:
         raise FetchError(f"Too many redirects (more than {s.max_redirects}) starting at {url}.")
 
     async def _get(
-        self, url: str, page: bool, method: str = "GET", json_body=None, limit: int | None = None
+        self, url: str, page: bool, method: str = "GET", json_body=None, limit: int | None = None,
+        headers: dict | None = None,
     ) -> FetchResult | str | None:
         s = self.settings
         limit = limit or s.max_bytes
-        kwargs = {"json": json_body if json_body is not None else {}} if method == "POST" else {}
+        kwargs: dict = {"json": json_body if json_body is not None else {}} if method == "POST" else {}
+        if headers:
+            kwargs["headers"] = headers
         try:
             async with self._client.stream(method, url, **kwargs) as resp:
                 if resp.status_code in _REDIRECT_CODES and resp.headers.get("location"):
