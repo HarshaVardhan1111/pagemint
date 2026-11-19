@@ -71,6 +71,19 @@ Open **Settings → Developer → Edit Config** (the file is `claude_desktop_con
 
 For JavaScript rendering use `"args": ["--from", "pagemint[js]", "pagemint"]`. Restart Claude Desktop afterwards.
 
+## Hosted PageMint (claude.ai web and phone)
+
+claude.ai in the browser and the Claude phone app can only use MCP servers on the internet. PageMint can run as one:
+
+- `pagemint serve --http` serves the same tools over Streamable HTTP at `/mcp`.
+- In **hosted mode** (`PAGEMINT_HOSTED=1`) people sign in with GitHub. PageMint never stores passwords or GitHub tokens; its own tokens are stored only as hashes.
+- Each person gets their own saved company list and daily limits: 200 pages, 100 job searches, 50 web searches and 30 JavaScript page renders. There are also server-wide caps, and requests to any one website stay at one per second for the whole server.
+- Logs keep only the time, user id, tool, website host name, result and duration. They never keep page contents, full links or search words, and are deleted after 14 days.
+
+To add a hosted PageMint to Claude: claude.ai → **Settings → Connectors → Add custom connector** → `https://YOUR-SERVER/mcp` → sign in with GitHub. Once added on the web, it also works on the phone.
+
+To run your own for free on Oracle Cloud's Always Free tier (Docker, automatic HTTPS, SearXNG for web search, nightly backups, automatic deploys from GitHub releases), follow [deploy/README.md](deploy/README.md).
+
 ## Tools
 
 ### `scrape(url, format="markdown", render_js=False)`
