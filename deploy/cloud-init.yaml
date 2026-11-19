@@ -1,0 +1,49 @@
+#cloud-config
+# Paste this into Oracle Cloud's "Create instance" -> "Show advanced options" -> "Initialization script".
+# Before pasting: replace PASTE-YOUR-DEPLOY-PUBLIC-KEY-HERE with the deploy key's public line (see deploy/README.md).
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - sqlite3
+  - curl
+  - openssl
+users:
+  - default
+  - name: deploy
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - PASTE-YOUR-DEPLOY-PUBLIC-KEY-HERE
+write_files:
+  - path: /etc/cron.d/pagemint-backup
+    permissions: "0644"
+    content: |
+      15 3 * * * deploy /opt/pagemint/backup.sh >> /opt/pagemint/backups/backup.log 2>&1
+runcmd:
+  # Oracle's Ubuntu images block everything but SSH in the VM firewall: open HTTP and HTTPS.
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+  - netfilter-persistent save || true
+  - systemctl enable --now docker
+  - usermod -aG docker deploy
+  - mkdir -p /opt/pagemint/searxng /opt/pagemint/data /opt/pagemint/backups
+  - |
+    cd /opt/pagemint
+    BASE=https://raw.githubusercontent.com/HarshaVardhan1111/pagemint/main/deploy
+    for f in docker-compose.yml Caddyfile searxng/settings.yml backup.sh .env.example; do
+      curl -fsSL "$BASE/$f" -o "$f"
+    done
+    chmod +x backup.sh
+    if [ ! -f .env ]; then
+      cp .env.example .env
+      sed -i "s/^PAGEMINT_SECRET_KEY=.*/PAGEMINT_SECRET_KEY=$(openssl rand -hex 32)/" .env
+      sed -i "s/^SEARXNG_SECRET=.*/SEARXNG_SECRET=$(openssl rand -hex 32)/" .env
+      IP=$(curl -fsS https://api.ipify.org || true)
+      if [ -n "$IP" ]; then
+        HOST=$(echo "$IP" | tr . -).sslip.io
+        sed -i "s/^PAGEMINT_HOST=.*/PAGEMINT_HOST=$HOST/; s#^PAGEMINT_PUBLIC_URL=.*#PAGEMINT_PUBLIC_URL=https://$HOST#" .env
+      fi
+      chmod 600 .env
+    fi
+    chown -R 10001:10001 /opt/pagemint/data
+    chown deploy:deploy /opt/pagemint /opt/pagemint/backups /opt/pagemint/.env /opt/pagemint/*.yml /opt/pagemint/Caddyfile /opt/pagemint/backup.sh

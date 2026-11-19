@@ -301,6 +301,7 @@ PageMint uses only permissively licensed libraries.
 | [playwright](https://github.com/microsoft/playwright-python) (optional `[js]`) | JavaScript rendering | Apache-2.0 |
 | [pytest](https://pytest.org/) (development) | Tests | MIT |
 | [pytest-asyncio](https://github.com/pytest-dev/pytest-asyncio) (development) | Async tests | Apache-2.0 |
+| [PyYAML](https://pyyaml.org/) (development) | Checking the hosting files | MIT |
 
 These pull in further dependencies, almost all MIT, BSD or Apache-2.0. Two exceptions:
 

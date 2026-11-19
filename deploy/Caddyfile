@@ -1,0 +1,5 @@
+# Caddy gets a free HTTPS certificate (Let's Encrypt) for PAGEMINT_HOST automatically.
+{$PAGEMINT_HOST} {
+	encode gzip
+	reverse_proxy pagemint:8000
+}

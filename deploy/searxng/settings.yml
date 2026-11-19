@@ -1,0 +1,9 @@
+# SearXNG for PageMint: only reachable inside the Docker network, JSON output on.
+use_default_settings: true
+server:
+  limiter: false
+  image_proxy: false
+search:
+  formats:
+    - html
+    - json

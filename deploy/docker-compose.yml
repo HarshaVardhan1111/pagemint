@@ -1,0 +1,58 @@
+# PageMint hosted stack. Profiles (set COMPOSE_PROFILES in .env):
+#   full  - PageMint with JavaScript rendering + SearXNG web search (Oracle A1 ARM VM)
+#   small - PageMint without browser and web search (the 1 GB x86 VM fallback)
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PAGEMINT_HOST: ${PAGEMINT_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  pagemint:
+    profiles: ["full"]
+    image: ghcr.io/harshavardhan1111/pagemint:${PAGEMINT_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PAGEMINT_HOSTED: "1"
+      PAGEMINT_DATA_DIR: /data
+      PAGEMINT_SEARXNG_URL: http://searxng:8080
+    volumes:
+      - ./data:/data
+    depends_on:
+      - searxng
+
+  pagemint-small:
+    profiles: ["small"]
+    image: ghcr.io/harshavardhan1111/pagemint:${PAGEMINT_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PAGEMINT_HOSTED: "1"
+      PAGEMINT_DATA_DIR: /data
+      PAGEMINT_JS_FALLBACK_CHARS: "0"
+    volumes:
+      - ./data:/data
+    networks:
+      default:
+        aliases: [pagemint]
+
+  searxng:
+    profiles: ["full"]
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+    volumes:
+      - ./searxng:/etc/searxng
+
+volumes:
+  caddy_data:
+  caddy_config:
