@@ -99,3 +99,20 @@ def test_full_description_unescapes_escaped_html():
     j = J("T", desc="&lt;p&gt;Hi &lt;strong&gt;there&lt;/strong&gt; &amp;amp; you&lt;/p&gt;")
     full = j.to_dict(snippet=False)["description"]
     assert "&lt;" not in full and "<p>" not in full and "**there**" in full and "& you" in full
+
+
+def test_specific_word_required_and_generic_words_weigh_less():
+    jobs = [
+        J("Senior Software Engineer - Java Developer", desc="Java, Spring"),
+        J("NetSuite Developer", desc="ERP work"),
+        J("Senior Site Reliability Engineer (K8s, Terraform, Python)"),
+        J("Python Developer"),
+        J("Backend Engineer", desc="We use Python and Go"),
+    ]
+    assert titles(filter_and_rank(jobs, "python developer", today=TODAY)) == [
+        "Python Developer", "Senior Site Reliability Engineer (K8s, Terraform, Python)", "Backend Engineer"]
+
+
+def test_generic_only_query_still_works():
+    jobs = [J("Senior Engineer"), J("Chef")]
+    assert titles(filter_and_rank(jobs, "senior engineer", today=TODAY)) == ["Senior Engineer"]

@@ -24,6 +24,18 @@ LOCATION_ALIASES = [
     {"kolkata", "calcutta"},
 ]
 DESC_CAP = 5
+# Words found in many job titles. They count for less, and a query that also has a
+# specific word (e.g. "python") only matches jobs that mention the specific word.
+GENERIC_WORDS = {
+    "engineer", "developer", "senior", "sr", "junior", "jr", "staff", "principal", "lead", "manager", "software",
+    "specialist", "associate", "intern", "internship", "head", "director", "analyst", "consultant", "executive",
+    "officer", "team", "member", "level", "ii", "iii", "iv", "full", "time", "part", "contract", "new", "graduate",
+}
+GENERIC_WEIGHT = 0.4
+
+
+def _weight(term: str) -> float:
+    return GENERIC_WEIGHT if term in GENERIC_WORDS else 1.0
 
 
 def _stem(word: str) -> str:
@@ -74,16 +86,19 @@ def score(job: Job, query_terms: list[str], phrase: str, today: date) -> float:
     s = 0.0
     if query_terms:
         title_terms = set(terms(job.title))
+        dept_terms = set(terms(job.department or ""))
+        desc_terms = set(terms(job.text()[:5000]))
+        specific = [t for t in query_terms if t not in GENERIC_WORDS]
+        if specific and not any(t in title_terms or t in dept_terms or t in desc_terms for t in specific):
+            return 0.0  # e.g. "python developer" never matches a Java developer job
         hits = [t for t in query_terms if t in title_terms]
-        s += 5 * len(hits)
+        s += 5 * sum(_weight(t) for t in hits)
         if len(hits) == len(query_terms):
             s += 5
         if phrase and phrase in " ".join(terms(job.title)):
             s += 5
-        dept_terms = set(terms(job.department or ""))
-        s += 2 * sum(1 for t in query_terms if t in dept_terms)
-        desc_terms = set(terms(job.text()[:5000]))
-        s += min(DESC_CAP, sum(1 for t in query_terms if t in desc_terms))
+        s += 2 * sum(_weight(t) for t in query_terms if t in dept_terms)
+        s += min(DESC_CAP, sum(_weight(t) for t in query_terms if t in desc_terms))
     return s
 
 
