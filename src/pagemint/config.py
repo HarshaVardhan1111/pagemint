@@ -35,6 +35,12 @@ class Settings:
     jobs_cache_hours: float = 6.0
     jobs_search_budget: float = 60.0
     data_dir: str = ""  # folder for the saved company list (default: the user's data folder)
+    # Web search: the user's own SearXNG and/or their own API keys (env vars only).
+    searxng_url: str = ""
+    tavily_api_key: str = field(default="", repr=False)
+    brave_api_key: str = field(default="", repr=False)
+    search_provider: str = ""
+    search_fallback: bool = False
     # Internal switch for tests; deliberately not settable from the environment.
     respect_robots: bool = field(default=True)
 
