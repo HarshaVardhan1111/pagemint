@@ -32,12 +32,30 @@ def _result(data: dict) -> CallToolResult:
 
 
 def build_http_app(settings):
-    """The Starlette app serving PageMint over Streamable HTTP at /mcp."""
-    server = build_server(client_factory=lambda: PageMint(settings))
+    """The Starlette app serving PageMint over Streamable HTTP at /mcp.
+
+    In hosted mode the app also serves the OAuth endpoints (with GitHub sign-in)
+    and every /mcp request needs a PageMint access token.
+    """
+    if not settings.hosted:
+        return build_server(client_factory=lambda: PageMint(settings)).streamable_http_app()
+
+    from pagemint.hosted.auth import CALLBACK_PATH, PageMintOAuthProvider, auth_settings
+    from pagemint.hosted.store import HostedStore
+
+    folder = Path(settings.data_dir) if settings.data_dir else default_data_dir()
+    client = PageMint(settings)
+    provider = PageMintOAuthProvider(HostedStore(str(folder / "hosted.sqlite3")), settings, client)
+    server = build_server(client_factory=lambda: client, auth_provider=provider, auth=auth_settings(settings))
+
+    @server.custom_route(CALLBACK_PATH, methods=["GET"])
+    async def github_callback(request):
+        return await provider.github_callback(request)
+
     return server.streamable_http_app()
 
 
-def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer:
+def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provider=None, auth=None) -> MCPServer:
     holder: dict[str, PageMint] = {}
 
     @asynccontextmanager
@@ -52,7 +70,8 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer
             if c is not None:
                 await c.aclose()
 
-    server = MCPServer(name="pagemint", version=__version__, instructions=INSTRUCTIONS, lifespan=lifespan)
+    server = MCPServer(name="pagemint", version=__version__, instructions=INSTRUCTIONS, lifespan=lifespan,
+                       auth_server_provider=auth_provider, auth=auth)
 
     def client() -> PageMint:
         if "c" not in holder:
