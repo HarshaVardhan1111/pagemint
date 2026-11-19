@@ -53,8 +53,14 @@ def build_http_app(settings):
 
     folder = Path(settings.data_dir) if settings.data_dir else default_data_dir()
     client = PageMint(settings)
-    provider = PageMintOAuthProvider(HostedStore(str(folder / "hosted.sqlite3")), settings, client)
-    server = build_server(client_factory=lambda: client, auth_provider=provider, auth=auth_settings(settings))
+    from pagemint.hosted.limits import Limits, RenderGate
+
+    store = HostedStore(str(folder / "hosted.sqlite3"))
+    provider = PageMintOAuthProvider(store, settings, client)
+    limits = Limits(store)
+    client.render_gate = RenderGate(limits)
+    server = build_server(client_factory=lambda: client, auth_provider=provider, auth=auth_settings(settings),
+                          limits=limits)
 
     @server.custom_route(CALLBACK_PATH, methods=["GET"])
     async def github_callback(request):
@@ -63,7 +69,16 @@ def build_http_app(settings):
     return server.streamable_http_app()
 
 
-def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provider=None, auth=None) -> MCPServer:
+# Errors that mean no page was fetched, so nothing is charged against daily limits.
+FREE_ERRORS = {"invalid_url", "invalid_argument", "blocked", "robots", "limit_reached", "not_configured", "not_found"}
+
+
+def _charged(result: dict) -> bool:
+    return (result.get("error") or {}).get("type") not in FREE_ERRORS
+
+
+def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provider=None, auth=None,
+                 limits=None) -> MCPServer:
     holder: dict = {}
 
     @asynccontextmanager
@@ -94,6 +109,31 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
             holder["jobs_store"] = JobStore(str(folder / "jobs.sqlite3"))
         return JobService(client(), holder["jobs_store"], user_id=current_user())
 
+    async def limited(body) -> CallToolResult:
+        """Run a tool body. In hosted mode: per-user/server-wide concurrency, and limit errors as results."""
+        if limits is None:
+            return _result(await body(None))
+        from pagemint.errors import error_dict
+        from pagemint.hosted.limits import CURRENT_USER, LimitReached
+
+        user = current_user()
+        token = CURRENT_USER.set(user)
+        try:
+            async with limits.guard(user):
+                return _result(await body(user))
+        except LimitReached as e:
+            return _result(error_dict(e))
+        finally:
+            CURRENT_USER.reset(token)
+
+    async def one_page(user, run, kind: str = "pages") -> dict:
+        if user:
+            limits.check(user, kind)
+        result = await run()
+        if user and _charged(result):
+            limits.charge(user, kind, 1)
+        return result
+
     @server.tool()
     async def scrape(
         url: str,
@@ -106,7 +146,7 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         format="links"), all links on the page, and the HTTP status code. Set render_js=True for pages
         that need JavaScript (needs the optional browser install).
         """
-        return _result(await client().scrape(url, format=format, render_js=render_js))
+        return await limited(lambda user: one_page(user, lambda: client().scrape(url, format=format, render_js=render_js)))
 
     @server.tool()
     async def crawl(
@@ -128,12 +168,27 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
             if ctx is not None:
                 await ctx.report_progress(done, total, f"Crawled {page_url}")
 
-        return _result(
-            await client().crawl(
-                url, max_pages=max_pages, max_depth=max_depth, same_domain=same_domain,
-                render_js=render_js, on_progress=progress,
-            )
-        )
+        async def body(user):
+            pages = max_pages
+            budget_limited = False
+            if user:
+                from pagemint.hosted.limits import HOSTED_CRAWL_CAP
+
+                limits.check(user, "pages")
+                wanted = min(int(max_pages), HOSTED_CRAWL_CAP)
+                pages = min(wanted, limits.remaining(user, "pages"))
+                budget_limited = pages < wanted
+            result = await client().crawl(url, max_pages=pages, max_depth=max_depth, same_domain=same_domain,
+                                          render_js=render_js, on_progress=progress)
+            if user and "pages" in result:
+                limits.charge(user, "pages", len(result["pages"]))
+                if budget_limited and len(result["pages"]) >= pages:
+                    result["warnings"].append(
+                        f"Stopped at your daily page limit ({limits.per_user['pages']} pages). {limits.reset_text()}"
+                    )
+            return result
+
+        return await limited(body)
 
     @server.tool(name="map")
     async def map_site(url: str, limit: int = 500) -> CallToolResult:
@@ -141,7 +196,7 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
 
         Returns up to limit URLs (maximum 5000) on the same host, without fetching each page.
         """
-        return _result(await client().map_site(url, limit=limit))
+        return await limited(lambda user: one_page(user, lambda: client().map_site(url, limit=limit)))
 
     @server.tool()
     async def search_jobs(
@@ -160,10 +215,10 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         remote=True: remote only; False: no remote; null: either. Jobs from company hiring systems are
         "open"; jobs from free sources are "unverified" (use check_job). Max 100 results.
         """
-        return _result(await jobs().search_jobs(
+        return await limited(lambda user: one_page(user, lambda: jobs().search_jobs(
             query, location=location, remote=remote, posted_within_days=posted_within_days,
             companies=companies, sources=sources, limit=limit,
-        ))
+        ), kind="job_searches"))
 
     @server.tool()
     async def company_jobs(
@@ -175,19 +230,24 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         (Greenhouse, Lever, Ashby, Workday, Recruitee, or job data on any careers page) and adds the company
         to your saved list for search_jobs. Workday companies need the careers URL.
         """
-        return _result(await jobs().company_jobs(company, query=query, location=location, remote=remote, limit=limit))
+        return await limited(lambda user: one_page(
+            user, lambda: jobs().company_jobs(company, query=query, location=location, remote=remote, limit=limit),
+            kind="job_searches"))
 
     @server.tool()
     async def check_job(url: str) -> CallToolResult:
         """Check whether a job link is still open. Returns status open, closed or unknown, the reason,
         and the full job description when it is open."""
-        return _result(await jobs().check_job(url))
+        return await limited(lambda user: one_page(user, lambda: jobs().check_job(url)))
 
     @server.tool()
     async def saved_companies(action: Literal["list", "add", "remove"] = "list", company: str | None = None) -> CallToolResult:
         """List, add or remove companies in your saved list (used by search_jobs). The list is stored
         only on this computer."""
-        return _result(await jobs().saved_companies(action, company))
+        if action == "add":
+            return await limited(lambda user: one_page(user, lambda: jobs().saved_companies(action, company),
+                                                       kind="job_searches"))
+        return await limited(lambda user: jobs().saved_companies(action, company))
 
     @server.tool()
     async def search(query: str, limit: int = 10, fetch_pages: int = 0,
@@ -200,6 +260,17 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         """
         from pagemint.search.service import run_search
 
-        return _result(await run_search(client(), query, limit=limit, fetch_pages=fetch_pages, provider=provider))
+        async def body(user):
+            n_pages = fetch_pages
+            if user:
+                limits.check(user, "web_searches")
+                n_pages = min(max(0, int(fetch_pages or 0)), limits.remaining(user, "pages"))
+            result = await run_search(client(), query, limit=limit, fetch_pages=n_pages, provider=provider)
+            if user and _charged(result):
+                limits.charge(user, "web_searches", 1)
+                limits.charge(user, "pages", sum(1 for p in result.get("pages", []) if "markdown" in p))
+            return result
+
+        return await limited(body)
 
     return server

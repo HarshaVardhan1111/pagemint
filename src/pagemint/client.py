@@ -52,6 +52,7 @@ class PageMint:
         self.settings = settings or Settings.from_env()
         self.fetcher = Fetcher(self.settings)
         self.renderer = renderer or BrowserRenderer(self.settings, self.fetcher)
+        self.render_gate = None  # hosted mode: limits browser renders (one at a time, daily budget)
 
     async def __aenter__(self) -> "PageMint":
         return self
@@ -103,6 +104,9 @@ class PageMint:
         await self.fetcher.check_allowed(url)
         limit = self.settings.page_timeout + RENDER_GRACE
         try:
+            if self.render_gate is not None:
+                async with self.render_gate.slot():
+                    return await asyncio.wait_for(self.renderer.render(url), timeout=limit)
             return await asyncio.wait_for(self.renderer.render(url), timeout=limit)
         except asyncio.TimeoutError as e:
             raise FetchTimeoutError(
