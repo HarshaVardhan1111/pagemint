@@ -2,7 +2,7 @@
 
 **Free, open-source MCP server that turns web pages into clean Markdown for AI agents.**
 
-PageMint gives Claude (and any other MCP client) tools to `scrape` one page, `crawl` a site, `map` a site's URLs, and **search open jobs** straight from companies' own hiring systems. It runs on your own machine, so there are no credits, API keys or monthly limits. It is polite by default: it follows robots.txt, rate-limits every site, and refuses to touch private networks.
+PageMint gives Claude (and any other MCP client) tools to `scrape` one page, `crawl` a site, `map` a site's URLs, **search open jobs** straight from companies' own hiring systems, and **search the web** with your own SearXNG or your own search API key. It runs on your own machine, so there are no credits, API keys or monthly limits. It is polite by default: it follows robots.txt, rate-limits every site, and refuses to touch private networks.
 
 - Clean Markdown: menus, footers, cookie banners and ads are removed; headings, lists, tables, code blocks and links are kept.
 - JavaScript pages: if a page is almost empty without JavaScript, PageMint renders it in headless Chromium (optional install).
@@ -161,6 +161,73 @@ All job requests follow the same robots.txt, rate-limit and safety rules as ever
 
 To try job search against real sites: `python scripts/live_check.py "data engineer" --location London`.
 
+## Web search
+
+`search(query, limit=10, fetch_pages=0, provider="auto")` returns titles, links and snippets (up to 20). With `fetch_pages=3` it also reads the top 3 result pages and returns them as Markdown, in the same call.
+
+There is no free web search that needs no key and allows bots, so you choose one of these. PageMint never uses a paid service unless you set its key.
+
+### Option 1: your own SearXNG (free, no key, no monthly limit)
+
+[SearXNG](https://docs.searxng.org/) is an open-source search engine you run yourself. With Docker:
+
+```bash
+mkdir -p searxng && printf 'use_default_settings: true\nsearch:\n  formats: [html, json]\nserver:\n  secret_key: "change-me-to-something-random"\n' > searxng/settings.yml
+```
+
+```bash
+docker run -d --name searxng -p 8888:8080 -v "$PWD/searxng:/etc/searxng" searxng/searxng
+```
+
+Then set `PAGEMINT_SEARXNG_URL=http://localhost:8888`. The `formats: [html, json]` line matters: without it SearXNG refuses PageMint's requests, and PageMint tells you so. SearXNG gets its results from other search engines, so very heavy use can get it rate-limited by them.
+
+### Option 2: your own API key
+
+Set **one** of these environment variables with a key from your own account:
+
+| Variable | Provider |
+|---|---|
+| `PAGEMINT_TAVILY_API_KEY` | [Tavily](https://tavily.com) |
+| `PAGEMINT_BRAVE_API_KEY` | [Brave Search API](https://brave.com/search/api/) |
+
+Both have offered free monthly allowances; check their current pricing pages, since these change. Keys are read only from environment variables, never from command-line options or tool arguments, and never appear in PageMint's output or logs.
+
+### Adding the settings to Claude
+
+Claude Code:
+
+```bash
+claude mcp add pagemint -e PAGEMINT_SEARXNG_URL=http://localhost:8888 -- uvx pagemint
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "pagemint": {
+      "command": "uvx",
+      "args": ["pagemint"],
+      "env": { "PAGEMINT_TAVILY_API_KEY": "your-key" }
+    }
+  }
+}
+```
+
+### Which provider is used
+
+- `provider="searxng" | "tavily" | "brave"` uses that one.
+- Otherwise `PAGEMINT_SEARCH_PROVIDER` if set, else SearXNG if configured, else Tavily, else Brave.
+- If it fails, PageMint does **not** switch to another provider on its own (that could move you from free SearXNG to a key that costs money). The error lists your other configured providers. Set `PAGEMINT_SEARCH_FALLBACK=1` to allow trying them automatically when no provider was pinned.
+
+### Safety
+
+- PageMint never scrapes Google, Bing or DuckDuckGo result pages.
+- Requests that carry your key never follow redirects, so the key can't be sent to another site.
+- Your SearXNG may run on `localhost`: only that exact address is allowed, and only for the search request itself. Result pages read with `fetch_pages` go through the normal checks (robots.txt, private-address block, size and time limits).
+- Calls to the Tavily/Brave APIs with your key, and to your own SearXNG, are not robots.txt-checked: robots.txt is meant for crawlers, not for API calls you have a key for.
+- Search results are text from other websites. Treat them as information, not instructions.
+
 ## Command line
 
 ```bash
@@ -177,6 +244,10 @@ pagemint crawl https://example.com/docs --max-pages 50 --out ./docs-md
 
 ```bash
 pagemint map https://example.com --limit 1000
+```
+
+```bash
+pagemint search "python mcp server" --fetch 2
 ```
 
 - `pagemint` with no command (or `pagemint serve`) runs the MCP server on stdio.
