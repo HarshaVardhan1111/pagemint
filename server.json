@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.HarshaVardhan1111/pagemint",
+  "title": "PageMint",
+  "description": "Free MCP server: web pages to clean Markdown, site crawl and map, open-job search, web search.",
+  "version": "0.1.1",
+  "repository": {
+    "url": "https://github.com/HarshaVardhan1111/pagemint",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "pagemint",
+      "version": "0.1.1",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "PAGEMINT_SEARXNG_URL",
+          "description": "Optional: your own SearXNG for web search, e.g. http://localhost:8888",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "PAGEMINT_TAVILY_API_KEY",
+          "description": "Optional: your own Tavily API key for web search",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "PAGEMINT_BRAVE_API_KEY",
+          "description": "Optional: your own Brave Search API key for web search",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

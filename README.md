@@ -1,5 +1,8 @@
 # PageMint
 
+<!-- mcp-name: io.github.HarshaVardhan1111/pagemint -->
+<!-- mcp-name: io.github.harshavardhan1111/pagemint -->
+
 **Free, open-source MCP server that turns web pages into clean Markdown for AI agents.**
 
 PageMint gives Claude (and any other MCP client) tools to `scrape` one page, `crawl` a site, `map` a site's URLs, **search open jobs** straight from companies' own hiring systems, and **search the web** with your own SearXNG or your own search API key. It runs on your own machine, so scraping, crawling and job search have no credits, API keys or monthly limits. (Web search needs your own SearXNG or your own search API key; see below.) It is polite by default: it follows robots.txt, rate-limits every site, and refuses to touch private networks.
@@ -21,10 +24,6 @@ Or run it without installing, using [uv](https://docs.astral.sh/uv/):
 ```bash
 uvx pagemint --help
 ```
-
-> **Before the first PyPI release**, install from GitHub instead:
-> `uvx --from git+https://github.com/HarshaVardhan1111/pagemint pagemint --help`
-> (and use the same `--from ...` in the setup commands below).
 
 ### Optional: JavaScript rendering
 

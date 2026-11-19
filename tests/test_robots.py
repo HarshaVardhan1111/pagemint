@@ -2,7 +2,9 @@ from conftest import Response, make_settings
 from pagemint.client import PageMint
 from pagemint.robots import parse_robots
 
-UA = "PageMint/0.1.0 (+https://github.com/HarshaVardhan1111/pagemint)"
+from pagemint import __version__
+
+UA = f"PageMint/{__version__} (+https://github.com/HarshaVardhan1111/pagemint)"
 
 
 def rules(text: str):
