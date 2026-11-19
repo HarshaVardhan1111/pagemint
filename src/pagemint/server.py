@@ -59,14 +59,44 @@ def build_http_app(settings):
     provider = PageMintOAuthProvider(store, settings, client)
     limits = Limits(store)
     client.render_gate = RenderGate(limits)
+    from urllib.parse import urlsplit
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from pagemint.hosted import pages
+    from pagemint.hosted.logs import CallLogger
+
+    logger = CallLogger(str(folder / "logs" / "calls.log"))
     server = build_server(client_factory=lambda: client, auth_provider=provider, auth=auth_settings(settings),
-                          limits=limits)
+                          limits=limits, call_logger=logger)
 
     @server.custom_route(CALLBACK_PATH, methods=["GET"])
     async def github_callback(request):
         return await provider.github_callback(request)
 
-    return server.streamable_http_app()
+    @server.custom_route("/", methods=["GET"])
+    async def home(request):
+        return pages.home(settings.public_url)
+
+    @server.custom_route("/terms", methods=["GET"])
+    async def terms(request):
+        return pages.terms()
+
+    @server.custom_route("/privacy", methods=["GET"])
+    async def privacy(request):
+        return pages.privacy()
+
+    @server.custom_route("/healthz", methods=["GET"])
+    async def healthz(request):
+        return pages.health()
+
+    public = urlsplit(settings.public_url)
+    hosts = [public.netloc, f"{public.hostname}:*", "localhost:*", "127.0.0.1:*"]
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True, allowed_hosts=hosts,
+        allowed_origins=[f"{public.scheme}://{public.netloc}", "https://claude.ai"],
+    )
+    return server.streamable_http_app(transport_security=security)
 
 
 # Errors that mean no page was fetched, so nothing is charged against daily limits.
@@ -78,7 +108,7 @@ def _charged(result: dict) -> bool:
 
 
 def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provider=None, auth=None,
-                 limits=None) -> MCPServer:
+                 limits=None, call_logger=None) -> MCPServer:
     holder: dict = {}
 
     @asynccontextmanager
@@ -109,22 +139,30 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
             holder["jobs_store"] = JobStore(str(folder / "jobs.sqlite3"))
         return JobService(client(), holder["jobs_store"], user_id=current_user())
 
-    async def limited(body) -> CallToolResult:
-        """Run a tool body. In hosted mode: per-user/server-wide concurrency, and limit errors as results."""
+    async def limited(body, tool: str = "?", target: str | None = None) -> CallToolResult:
+        """Run a tool body. In hosted mode: per-user/server-wide concurrency, limit errors as results, call log."""
         if limits is None:
             return _result(await body(None))
+        import time as _time
+
         from pagemint.errors import error_dict
         from pagemint.hosted.limits import CURRENT_USER, LimitReached
 
         user = current_user()
         token = CURRENT_USER.set(user)
+        started = _time.monotonic()
+        result: dict = {"error": {"type": "internal"}}
         try:
             async with limits.guard(user):
-                return _result(await body(user))
+                result = await body(user)
         except LimitReached as e:
-            return _result(error_dict(e))
+            result = error_dict(e)
         finally:
             CURRENT_USER.reset(token)
+            if call_logger is not None:
+                status = (result.get("error") or {}).get("type", "ok")
+                call_logger.log(user, tool, target, status, int((_time.monotonic() - started) * 1000))
+        return _result(result)
 
     async def one_page(user, run, kind: str = "pages") -> dict:
         if user:
@@ -146,7 +184,8 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         format="links"), all links on the page, and the HTTP status code. Set render_js=True for pages
         that need JavaScript (needs the optional browser install).
         """
-        return await limited(lambda user: one_page(user, lambda: client().scrape(url, format=format, render_js=render_js)))
+        return await limited(lambda user: one_page(user, lambda: client().scrape(url, format=format, render_js=render_js)),
+                             "scrape", url)
 
     @server.tool()
     async def crawl(
@@ -188,7 +227,7 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
                     )
             return result
 
-        return await limited(body)
+        return await limited(body, "crawl", url)
 
     @server.tool(name="map")
     async def map_site(url: str, limit: int = 500) -> CallToolResult:
@@ -196,7 +235,7 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
 
         Returns up to limit URLs (maximum 5000) on the same host, without fetching each page.
         """
-        return await limited(lambda user: one_page(user, lambda: client().map_site(url, limit=limit)))
+        return await limited(lambda user: one_page(user, lambda: client().map_site(url, limit=limit)), "map", url)
 
     @server.tool()
     async def search_jobs(
@@ -218,7 +257,7 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         return await limited(lambda user: one_page(user, lambda: jobs().search_jobs(
             query, location=location, remote=remote, posted_within_days=posted_within_days,
             companies=companies, sources=sources, limit=limit,
-        ), kind="job_searches"))
+        ), kind="job_searches"), "search_jobs")
 
     @server.tool()
     async def company_jobs(
@@ -232,13 +271,13 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         """
         return await limited(lambda user: one_page(
             user, lambda: jobs().company_jobs(company, query=query, location=location, remote=remote, limit=limit),
-            kind="job_searches"))
+            kind="job_searches"), "company_jobs", company if company.startswith("http") else None)
 
     @server.tool()
     async def check_job(url: str) -> CallToolResult:
         """Check whether a job link is still open. Returns status open, closed or unknown, the reason,
         and the full job description when it is open."""
-        return await limited(lambda user: one_page(user, lambda: jobs().check_job(url)))
+        return await limited(lambda user: one_page(user, lambda: jobs().check_job(url)), "check_job", url)
 
     @server.tool()
     async def saved_companies(action: Literal["list", "add", "remove"] = "list", company: str | None = None) -> CallToolResult:
@@ -246,8 +285,8 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         only on this computer."""
         if action == "add":
             return await limited(lambda user: one_page(user, lambda: jobs().saved_companies(action, company),
-                                                       kind="job_searches"))
-        return await limited(lambda user: jobs().saved_companies(action, company))
+                                                       kind="job_searches"), "saved_companies")
+        return await limited(lambda user: jobs().saved_companies(action, company), "saved_companies")
 
     @server.tool()
     async def search(query: str, limit: int = 10, fetch_pages: int = 0,
@@ -271,6 +310,6 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
                 limits.charge(user, "pages", sum(1 for p in result.get("pages", []) if "markdown" in p))
             return result
 
-        return await limited(body)
+        return await limited(body, "search")
 
     return server
