@@ -56,7 +56,8 @@ def _company_view(c: dict) -> dict:
 
 
 class JobService:
-    def __init__(self, client, store: JobStore):
+    def __init__(self, client, store: JobStore, user_id: str = "local"):
+        self.user_id = user_id
         self.client = client
         self.store = store
         self.settings: Settings = client.settings
@@ -114,16 +115,16 @@ class JobService:
         """A saved company row for a name/URL, detecting and saving it if new."""
         is_url = company.strip().lower().startswith(("http://", "https://"))
         if not is_url:
-            saved = self.store.get_company(company)
+            saved = self.store.get_company(company, user_id=self.user_id)
             if saved:
                 return saved, None
         det = await detect.detect_company(self.client, company)
         if det.board is None:
             raise LookupError(det.warnings[0] if det.warnings else f"Could not find '{company}'.")
-        cid = self.store.save_company(det.company_name, det.board, det.confidence)
+        cid = self.store.save_company(det.company_name, det.board, det.confidence, user_id=self.user_id)
         if det.jobs is not None:
             self.store.cache_jobs(company_key(det.board), det.jobs)
-        return self.store.get_company(str(cid)), det
+        return self.store.get_company(str(cid), user_id=self.user_id), det
 
     # ---- tools ---------------------------------------------------------
 
@@ -188,7 +189,7 @@ class JobService:
                         if det:
                             warnings.extend(det.warnings)
             else:
-                rows = self.store.list_companies()
+                rows = self.store.list_companies(user_id=self.user_id)
             if not rows and sources == "companies":
                 warnings.append("No saved companies yet. Use company_jobs or saved_companies(action='add') to add some.")
 
@@ -250,7 +251,7 @@ class JobService:
         job_id = (parse_qs(urlsplit(url).query).get("gh_jid") or [""])[0]
         if not job_id.isdigit():
             return None
-        for row in self.store.list_companies():
+        for row in self.store.list_companies(user_id=self.user_id):
             if row["system"] != "greenhouse":
                 continue
             board = JobStore.board_of(row)
@@ -309,8 +310,8 @@ class JobService:
                 if det and det.warnings:
                     result["warnings"] = det.warnings
             elif action == "remove":
-                result["removed"] = self.store.remove_company(company)
-            companies = [_company_view(c) for c in self.store.list_companies()]
+                result["removed"] = self.store.remove_company(company, user_id=self.user_id)
+            companies = [_company_view(c) for c in self.store.list_companies(user_id=self.user_id)]
             result.update({"companies": companies, "count": len(companies)})
             result["warnings"] = result.get("warnings", []) + self._warnings()
             return result

@@ -171,3 +171,40 @@ async def test_github_cancel(app):
             st = parse_qs(urlsplit(auth.headers["location"]).query)["state"][0]
             cb = await http.get(f"{srv.url}/oauth/github/callback", params={"error": "access_denied", "state": st})
     assert cb.status_code == 403 and "cancel" in cb.text.lower()
+
+
+async def mcp_call(http, base, token, tool, args):
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
+    init = await http.post(f"{base}/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}})
+    sid = init.headers.get("mcp-session-id")
+    if sid:
+        headers["mcp-session-id"] = sid
+    await http.post(f"{base}/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    r = await http.post(f"{base}/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": args}})
+    text = r.text
+    if "data:" in text:  # event-stream answer
+        text = [ln[5:].strip() for ln in text.splitlines() if ln.startswith("data:")][-1]
+    return json.loads(json.loads(text)["result"]["content"][0]["text"])
+
+
+async def test_each_user_sees_only_their_saved_companies(app, fake_github, monkeypatch):
+    from fixtures_jobs import GREENHOUSE_FEED
+    from pagemint.jobs.readers import greenhouse
+
+    monkeypatch.setattr(greenhouse, "BASE", fake_github.url("").rstrip("/"))
+    fake_github.route("/v1/boards/acme/jobs", Response(json.dumps(GREENHOUSE_FEED), headers=JSON))
+    with app(allowed_users="alice,bob") as srv:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as http:
+            tokens = {}
+            for i, login in enumerate(("alice", "bob")):
+                fake_github.route("/api/user", Response(json.dumps(gh_user(login=login, uid=100 + i)), headers=JSON))
+                r = await sign_in(srv.url, http, state=login)
+                _, tok = await tokens_for(srv.url, http, r["callback"], r["client_id"])
+                tokens[login] = tok.json()["access_token"]
+            added = await mcp_call(http, srv.url, tokens["alice"], "saved_companies",
+                                   {"action": "add", "company": "https://boards.greenhouse.io/acme"})
+            assert added["count"] == 1, added
+            assert (await mcp_call(http, srv.url, tokens["bob"], "saved_companies", {}))["count"] == 0
+            assert (await mcp_call(http, srv.url, tokens["alice"], "saved_companies", {}))["count"] == 1

@@ -19,7 +19,8 @@ MAX_COMPANIES = 500
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL DEFAULT 'local',
+    key TEXT NOT NULL,
     name TEXT NOT NULL,
     system TEXT NOT NULL,
     board TEXT NOT NULL,
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS companies (
     added_at REAL NOT NULL,
     last_refreshed REAL,
     last_error TEXT,
-    job_count INTEGER
+    job_count INTEGER,
+    UNIQUE (user_id, key)
 );
 CREATE TABLE IF NOT EXISTS job_cache (
     key TEXT PRIMARY KEY,
@@ -81,7 +83,24 @@ class JobStore:
                 )
         if self._conn is None:
             self._conn = self._open(":memory:")
+        self._migrate()
         self._conn.executescript(_SCHEMA)
+
+    def _migrate(self) -> None:
+        """Files from before per-user lists: rebuild companies with a user_id (rows become 'local')."""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(companies)").fetchall()]
+        if not cols or "user_id" in cols:
+            return
+        with self._lock:
+            self._conn.executescript(
+                "ALTER TABLE companies RENAME TO companies_old;"
+                + _SCHEMA
+                + "INSERT INTO companies (id, user_id, key, name, system, board, host, site, careers_url, confidence,"
+                "  added_at, last_refreshed, last_error, job_count)"
+                " SELECT id, 'local', key, name, system, board, host, site, careers_url, confidence,"
+                "  added_at, last_refreshed, last_error, job_count FROM companies_old;"
+                "DROP TABLE companies_old;"
+            )
 
     @staticmethod
     def _open(path: str) -> sqlite3.Connection:
@@ -99,53 +118,55 @@ class JobStore:
 
     # ---- companies -----------------------------------------------------
 
-    def save_company(self, name: str, board: Board, confidence: str | None) -> int:
+    def save_company(self, name: str, board: Board, confidence: str | None, user_id: str = "local") -> int:
         key = company_key(board)
         with self._lock:
-            row = self._conn.execute("SELECT id FROM companies WHERE key = ?", (key,)).fetchone()
+            row = self._conn.execute("SELECT id FROM companies WHERE key = ? AND user_id = ?", (key, user_id)).fetchone()
             if row:
                 self._conn.execute(
                     "UPDATE companies SET name = ?, careers_url = COALESCE(?, careers_url), confidence = ? WHERE id = ?",
                     (name, board.careers_url, confidence, row["id"]),
                 )
                 return int(row["id"])
-            count = self._conn.execute("SELECT COUNT(*) AS n FROM companies").fetchone()["n"]
+            count = self._conn.execute("SELECT COUNT(*) AS n FROM companies WHERE user_id = ?", (user_id,)).fetchone()["n"]
             if count >= MAX_COMPANIES:
                 raise InvalidArgumentError(
                     f"The saved list is full ({MAX_COMPANIES} companies). Remove some with saved_companies(action='remove')."
                 )
             cur = self._conn.execute(
-                "INSERT INTO companies (key, name, system, board, host, site, careers_url, confidence, added_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (key, name, board.system, board.board, board.host, board.site, board.careers_url, confidence, time.time()),
+                "INSERT INTO companies (user_id, key, name, system, board, host, site, careers_url, confidence, added_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, key, name, board.system, board.board, board.host, board.site, board.careers_url, confidence, time.time()),
             )
             return int(cur.lastrowid)
 
-    def _find(self, name_or_id: str) -> sqlite3.Row | None:
+    def _find(self, name_or_id: str, user_id: str) -> sqlite3.Row | None:
         s = str(name_or_id).strip()
         if s.isdigit():
-            rows = self._exec("SELECT * FROM companies WHERE id = ?", (int(s),))
+            rows = self._exec("SELECT * FROM companies WHERE id = ? AND user_id = ?", (int(s), user_id))
             if rows:
                 return rows[0]
         rows = self._exec(
-            "SELECT * FROM companies WHERE lower(name) = lower(?) OR lower(board) = lower(?) ORDER BY id", (s, s)
+            "SELECT * FROM companies WHERE user_id = ? AND (lower(name) = lower(?) OR lower(board) = lower(?)) ORDER BY id",
+            (user_id, s, s),
         )
         return rows[0] if rows else None
 
-    def get_company(self, name_or_id: str) -> dict | None:
-        row = self._find(name_or_id)
+    def get_company(self, name_or_id: str, user_id: str = "local") -> dict | None:
+        row = self._find(name_or_id, user_id)
         return dict(row) if row else None
 
-    def remove_company(self, name_or_id: str) -> bool:
-        row = self._find(name_or_id)
+    def remove_company(self, name_or_id: str, user_id: str = "local") -> bool:
+        row = self._find(name_or_id, user_id)
         if not row:
             return False
         self._exec("DELETE FROM companies WHERE id = ?", (row["id"],))
-        self._exec("DELETE FROM job_cache WHERE key = ?", (row["key"],))
+        if not self._exec("SELECT 1 FROM companies WHERE key = ? LIMIT 1", (row["key"],)):
+            self._exec("DELETE FROM job_cache WHERE key = ?", (row["key"],))  # nobody else uses this feed
         return True
 
-    def list_companies(self) -> list[dict]:
-        return [dict(r) for r in self._exec("SELECT * FROM companies ORDER BY lower(name)")]
+    def list_companies(self, user_id: str = "local") -> list[dict]:
+        return [dict(r) for r in self._exec("SELECT * FROM companies WHERE user_id = ? ORDER BY lower(name)", (user_id,))]
 
     @staticmethod
     def board_of(company: dict) -> Board:

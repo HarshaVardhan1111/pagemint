@@ -31,6 +31,14 @@ def _result(data: dict) -> CallToolResult:
     )
 
 
+def current_user() -> str:
+    """The signed-in user's id in hosted mode; 'local' for the local (stdio / localhost) server."""
+    from mcp.server.auth.middleware.auth_context import get_access_token
+
+    token = get_access_token()
+    return token.subject if token is not None and token.subject else "local"
+
+
 def build_http_app(settings):
     """The Starlette app serving PageMint over Streamable HTTP at /mcp.
 
@@ -56,16 +64,16 @@ def build_http_app(settings):
 
 
 def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provider=None, auth=None) -> MCPServer:
-    holder: dict[str, PageMint] = {}
+    holder: dict = {}
 
     @asynccontextmanager
     async def lifespan(_server):
         try:
             yield {}
         finally:  # close HTTP connections and the browser on shutdown
-            jobs = holder.pop("jobs", None)
-            if jobs is not None:
-                jobs.store.close()
+            store = holder.pop("jobs_store", None)
+            if store is not None:
+                store.close()
             c = holder.pop("c", None)
             if c is not None:
                 await c.aclose()
@@ -79,11 +87,12 @@ def build_server(client_factory: Callable[[], PageMint] = PageMint, auth_provide
         return holder["c"]
 
     def jobs() -> JobService:
-        if "jobs" not in holder:
+        """A job service for whoever is calling: their own saved list, shared feed cache."""
+        if "jobs_store" not in holder:
             c = client()
             folder = Path(c.settings.data_dir) if c.settings.data_dir else default_data_dir()
-            holder["jobs"] = JobService(c, JobStore(str(folder / "jobs.sqlite3")))
-        return holder["jobs"]
+            holder["jobs_store"] = JobStore(str(folder / "jobs.sqlite3"))
+        return JobService(client(), holder["jobs_store"], user_id=current_user())
 
     @server.tool()
     async def scrape(
