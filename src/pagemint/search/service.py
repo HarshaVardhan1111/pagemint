@@ -78,6 +78,12 @@ async def run_search(client, query: str, limit: int = 10, fetch_pages: int = 0, 
         if not available:
             return {"query": query, "error": {"type": "not_configured", "message": NOT_CONFIGURED}}
         env_choice = (settings.search_provider or "").strip().lower()
+        if env_choice == "auto":
+            env_choice = ""
+        if env_choice and env_choice not in PROVIDERS:
+            raise InvalidArgumentError(
+                f"PAGEMINT_SEARCH_PROVIDER='{env_choice}' is not a provider. Use auto, {', '.join(PROVIDERS)}."
+            )
         pinned = provider != "auto" or bool(env_choice)
         chosen = provider if provider != "auto" else (env_choice or available[0])
         if chosen not in available:

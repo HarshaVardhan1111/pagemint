@@ -63,6 +63,7 @@ class Settings:
 
 
 def _parse(raw: str, typ: type):
+    raw = raw.strip()  # .env files and JSON configs often add spaces, \r or \n
     if typ is bool:
         return raw.strip().lower() in {"1", "true", "yes", "on"}
     if typ is int:

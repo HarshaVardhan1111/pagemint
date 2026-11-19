@@ -135,3 +135,51 @@ async def test_keys_never_in_output_or_logs(routes, caplog):
     blob = json.dumps(r) + caplog.text
     assert TKEY not in blob and BKEY not in blob
     assert r["provider"] == "brave"
+
+
+# ---- final review fixes ----
+
+async def test_key_with_control_character_never_leaks(routes, caplog):
+    caplog.set_level(logging.DEBUG)
+    bad = TKEY + "\r"
+    r = await run(make_settings(tavily_api_key=bad), query="x")
+    blob = json.dumps(r) + caplog.text
+    assert "SECRET" not in blob
+    assert "PAGEMINT_TAVILY_API_KEY" in r["error"]["message"]
+
+
+def test_from_env_strips_whitespace(monkeypatch):
+    from pagemint.config import Settings
+
+    monkeypatch.setenv("PAGEMINT_TAVILY_API_KEY", " tvly-abc\r\n")
+    assert Settings.from_env().tavily_api_key == "tvly-abc"
+
+
+async def test_searxng_url_credentials_never_shown(routes):
+    routes.route("/sx/search", Response("boom", status=500, headers={"Content-Type": "text/plain"}))
+    url = routes.url("/sx").replace("http://", "http://admin:hunter2@")
+    r = await run(make_settings(searxng_url=url), query="x")
+    assert "error" in r and "hunter2" not in json.dumps(r) and "admin:" not in json.dumps(r)
+
+
+@pytest.mark.parametrize("payload", [{"web": ["x"]}, {"web": {"results": "nope"}}, ["not", "a", "dict"]])
+async def test_malformed_brave_answer_is_fetch_error_and_falls_back(routes, payload):
+    routes.route("/brv/res/v1/web/search", Response(js(payload), headers=JSON))
+    r = await run(make_settings(brave_api_key=BKEY), query="x")
+    assert r["error"]["type"] == "fetch" and "unexpected" in r["error"]["message"]
+    r2 = await run(make_settings(brave_api_key=BKEY, tavily_api_key=TKEY, search_fallback=True,
+                                 search_provider=""), query="x", provider="auto")
+    assert r2["provider"] == "tavily"  # tavily comes first anyway; check brave-first case below
+
+
+async def test_malformed_first_provider_falls_back(routes):
+    routes.route("/tav/search", Response(js({"results": "nope"}), headers=JSON))
+    r = await run(make_settings(tavily_api_key=TKEY, brave_api_key=BKEY, search_fallback=True), query="x")
+    assert r["provider"] == "brave"
+
+
+async def test_env_provider_auto_and_unknown(routes):
+    r = await run(make_settings(tavily_api_key=TKEY, search_provider="auto"), query="x")
+    assert r["provider"] == "tavily"
+    bad = await run(make_settings(tavily_api_key=TKEY, search_provider="googel"), query="x")
+    assert bad["error"]["type"] == "invalid_argument" and "searxng" in bad["error"]["message"]

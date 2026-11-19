@@ -2,7 +2,7 @@
 
 **Free, open-source MCP server that turns web pages into clean Markdown for AI agents.**
 
-PageMint gives Claude (and any other MCP client) tools to `scrape` one page, `crawl` a site, `map` a site's URLs, **search open jobs** straight from companies' own hiring systems, and **search the web** with your own SearXNG or your own search API key. It runs on your own machine, so there are no credits, API keys or monthly limits. It is polite by default: it follows robots.txt, rate-limits every site, and refuses to touch private networks.
+PageMint gives Claude (and any other MCP client) tools to `scrape` one page, `crawl` a site, `map` a site's URLs, **search open jobs** straight from companies' own hiring systems, and **search the web** with your own SearXNG or your own search API key. It runs on your own machine, so scraping, crawling and job search have no credits, API keys or monthly limits. (Web search needs your own SearXNG or your own search API key; see below.) It is polite by default: it follows robots.txt, rate-limits every site, and refuses to touch private networks.
 
 - Clean Markdown: menus, footers, cookie banners and ads are removed; headings, lists, tables, code blocks and links are kept.
 - JavaScript pages: if a page is almost empty without JavaScript, PageMint renders it in headless Chromium (optional install).
