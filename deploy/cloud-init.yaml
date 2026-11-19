@@ -46,4 +46,5 @@ runcmd:
       chmod 600 .env
     fi
     chown -R 10001:10001 /opt/pagemint/data
-    chown deploy:deploy /opt/pagemint /opt/pagemint/backups /opt/pagemint/.env /opt/pagemint/*.yml /opt/pagemint/Caddyfile /opt/pagemint/backup.sh
+    chown -R deploy:deploy /opt/pagemint/searxng
+    chown deploy:deploy /opt/pagemint /opt/pagemint/backups /opt/pagemint/.env.example /opt/pagemint/.env /opt/pagemint/*.yml /opt/pagemint/Caddyfile /opt/pagemint/backup.sh

@@ -108,18 +108,22 @@ requests** → create one with *Permit object reads and writes*, and put its URL
 1. Repeat step 3 (same cloud-init) and attach the same reserved IP (step 4).
 2. Repeat step 6 (copy the GitHub client id/secret into the new `.env`; keep the same
    `PAGEMINT_SECRET_KEY` if you saved it, otherwise users simply sign in again).
-3. Restore the newest backup: download `pagemint-*.tar.gz` from your bucket (or old server), then
-   on the server:
+3. Restore the newest backup: download `pagemint-*.tar.gz` from your bucket (or old server), copy it
+   to the server, then:
 
 ```bash
-cd /opt/pagemint && tar xzf pagemint-YYYYMMDDTHHMMSSZ.tar.gz -C data
-```
-
-```bash
-cd /opt/pagemint/data && for f in *-*.sqlite3; do sudo mv "$f" "${f%%-*}.sqlite3"; done && sudo chown 10001:10001 *.sqlite3
+cd /opt/pagemint && sudo tar xzf pagemint-YYYYMMDDTHHMMSSZ.tar.gz -C data && sudo chown 10001:10001 data/*.sqlite3
 ```
 
 4. Re-run the `deploy` workflow (Actions → deploy → Run workflow).
+
+## Blocking someone
+
+```bash
+cd /opt/pagemint && docker compose exec pagemint pagemint admin block THEIR-GITHUB-USERNAME
+```
+
+(`unblock` reverses it. Removing a name from `PAGEMINT_ALLOWED_USERS` also ends that person's access.)
 
 ## Useful commands on the server
 

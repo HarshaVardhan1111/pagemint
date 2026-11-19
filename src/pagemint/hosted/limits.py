@@ -11,7 +11,7 @@ from pagemint.errors import PageMintError
 from pagemint.hosted.store import HostedStore
 
 DEFAULT_LIMITS = {"pages": 200, "job_searches": 100, "web_searches": 50, "renders": 30}
-GLOBAL_LIMITS = {"pages": 5000, "web_searches": 500}
+GLOBAL_LIMITS = {"pages": 5000, "web_searches": 500, "job_searches": 2000}
 NAMES = {"pages": "pages", "job_searches": "job searches", "web_searches": "web searches",
          "renders": "JavaScript page renders"}
 PER_USER_CONCURRENT = 2

@@ -168,3 +168,17 @@ async def test_auto_fallback_skipped_without_render_budget(server, limits):
             CURRENT_USER.reset(token)
     assert r.spans == [] and out["rendered_js"] is False
     assert any("limit" in w for w in out["warnings"])
+
+
+async def test_company_not_found_still_counts(server, limits, monkeypatch):
+    from pagemint.jobs.readers import ashby, greenhouse, lever
+
+    root = server.url("").rstrip("/")
+    monkeypatch.setattr(greenhouse, "BASE", root)
+    monkeypatch.setattr(ashby, "BASE", root)
+    monkeypatch.setattr(lever, "HOST_OVERRIDE", root)
+    srv = build_server(client_factory=lambda: PageMint(make_settings()), limits=limits)
+    async with Client(srv) as c:
+        r = await call(c, "company_jobs", {"company": "Nobody Here"})
+    assert r["error"]["type"] == "not_found"
+    assert limits.remaining("local", "job_searches") == 99

@@ -100,7 +100,7 @@ def build_http_app(settings):
 
 
 # Errors that mean no page was fetched, so nothing is charged against daily limits.
-FREE_ERRORS = {"invalid_url", "invalid_argument", "blocked", "robots", "limit_reached", "not_configured", "not_found"}
+FREE_ERRORS = {"invalid_url", "invalid_argument", "blocked", "robots", "limit_reached", "not_configured"}
 
 
 def _charged(result: dict) -> bool:

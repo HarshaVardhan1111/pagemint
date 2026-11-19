@@ -14,13 +14,15 @@ import logging
 import secrets
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     RefreshToken,
+    RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
@@ -41,6 +43,23 @@ REFRESH_TTL = 30 * 86400
 CODE_TTL = 300
 LOGIN_TTL = 600
 CALLBACK_PATH = "/oauth/github/callback"
+# Only these apps may receive sign-in codes: Claude's own callback pages, and the person's own computer
+# (loopback, used by local MCP clients). Anything else could be used to steal a signed-in user's access.
+KNOWN_REDIRECT_URIS = {"https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"}
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+MAX_PENDING = 10_000
+MAX_CLIENTS = 10_000
+PURGE_EVERY = 600  # seconds
+
+
+def redirect_allowed(uri: str, extra: set[str] | None = None) -> bool:
+    if uri in KNOWN_REDIRECT_URIS or (extra and uri in extra):
+        return True
+    try:
+        p = urlsplit(uri)
+    except ValueError:
+        return False
+    return p.scheme == "http" and (p.hostname or "") in LOOPBACK_HOSTS
 
 
 def auth_settings(settings) -> AuthSettings:
@@ -70,6 +89,23 @@ class PageMintOAuthProvider:
         self.store = store
         self.settings = settings
         self.client = client
+        self._last_purge = time.time()
+
+    def maybe_purge(self) -> None:
+        """Delete expired codes, logins and tokens every few minutes."""
+        if time.time() - self._last_purge >= PURGE_EVERY:
+            self._last_purge = time.time()
+            self.store.purge_expired()
+
+    def _user_allowed(self, user_id: str | None) -> bool:
+        """Re-checked on every token use: blocked users and users removed from the list lose access."""
+        user = self.store.get_user(user_id) if user_id else None
+        if not user or user.get("blocked"):
+            return False
+        allowed = (self.settings.allowed_users or "").strip()
+        if allowed == "*":
+            return True
+        return user["login"].lower() in {x.strip().lower() for x in allowed.split(",") if x.strip()}
 
     @property
     def _base(self) -> str:
@@ -82,11 +118,30 @@ class PageMintOAuthProvider:
         return OAuthClientInformationFull.model_validate(info) if info else None
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        self.maybe_purge()
+        uris = [str(u) for u in (client_info.redirect_uris or [])]
+        extra = {x.strip() for x in (getattr(self.settings, "allowed_redirect_uris", "") or "").split(",") if x.strip()}
+        bad = [u for u in uris if not redirect_allowed(u, extra)]
+        if not uris or bad:
+            raise RegistrationError(
+                error="invalid_redirect_uri",
+                error_description="Only Claude's callback addresses and this computer's own (loopback) addresses "
+                                  "can be used with PageMint.",
+            )
+        if self.store.count("clients") >= MAX_CLIENTS:
+            raise RegistrationError(error="invalid_client_metadata",
+                                    error_description="PageMint cannot register more apps right now.")
         self.store.save_client(client_info.client_id, client_info.model_dump(mode="json", exclude_none=True))
 
     # ---- authorize: send the person to GitHub ------------------------------
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+        self.maybe_purge()
+        if self.store.count("pending") >= MAX_PENDING:
+            self.store.purge_expired()
+            if self.store.count("pending") >= MAX_PENDING:
+                raise AuthorizeError(error="temporarily_unavailable",
+                                     error_description="Too many sign-ins in progress; try again in a few minutes.")
         state = secrets.token_urlsafe(32)
         self.store.put_pending(state, {"client_id": client.client_id, "params": params.model_dump(mode="json")},
                                expires_at=time.time() + LOGIN_TTL)
@@ -131,6 +186,9 @@ class PageMintOAuthProvider:
         except PageMintError as e:
             log.warning("GitHub sign-in failed: %s", e.message)
             return page(502, "GitHub sign-in failed", e.message + " Please try again.")
+        existing = self.store.get_user_by_github_id(user["id"])
+        if existing and existing.get("blocked"):
+            return page(403, "Not available", "This account has been blocked from PageMint.")
         refusal = self._refusal(user["login"], user.get("created_at"))
         if refusal:
             log.info("sign-in refused for GitHub user id %s", user["id"])
@@ -176,19 +234,21 @@ class PageMintOAuthProvider:
 
     async def load_refresh_token(self, client: OAuthClientInformationFull, refresh_token: str):
         data = self.store.get_token(refresh_token, "refresh")
-        if not data or data["client_id"] != client.client_id:
+        if not data or data["client_id"] != client.client_id or not self._user_allowed(data.get("subject")):
             return None
         return RefreshToken(token=refresh_token, **data)
 
     async def exchange_refresh_token(self, client: OAuthClientInformationFull, refresh_token, scopes: list[str]) -> OAuthToken:
-        if self.store.get_token(refresh_token.token, "refresh") is None:
+        if self.store.get_token(refresh_token.token, "refresh") is None or not self._user_allowed(refresh_token.subject):
             raise TokenError(error="invalid_grant", error_description="refresh token is invalid")
         self.store.revoke_token(refresh_token.token)  # rotation: each refresh token works once
         return self._issue(client.client_id, scopes or refresh_token.scopes, refresh_token.resource, refresh_token.subject)
 
     async def load_access_token(self, token: str):
         data = self.store.get_token(token, "access")
-        return AccessToken(token=token, **data) if data else None
+        if not data or not self._user_allowed(data.get("subject")):
+            return None
+        return AccessToken(token=token, **data)
 
     async def revoke_token(self, token) -> None:
         self.store.revoke_token(token.token)

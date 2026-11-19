@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     github_id INTEGER NOT NULL UNIQUE,
     login TEXT NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    blocked INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS clients (client_id TEXT PRIMARY KEY, info_json TEXT NOT NULL, created_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_codes (hash TEXT PRIMARY KEY, data_json TEXT NOT NULL, expires_at REAL NOT NULL);
@@ -53,6 +54,9 @@ class HostedStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "blocked" not in cols:
+            self._conn.execute("ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
 
     def _exec(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -78,6 +82,26 @@ class HostedStore:
     def get_user(self, user_id: str) -> dict | None:
         rows = self._exec("SELECT * FROM users WHERE id = ?", (user_id,))
         return dict(rows[0]) if rows else None
+
+    def get_user_by_github_id(self, github_id: int) -> dict | None:
+        rows = self._exec("SELECT * FROM users WHERE github_id = ?", (int(github_id),))
+        return dict(rows[0]) if rows else None
+
+    def set_blocked(self, login: str, blocked: bool) -> bool:
+        """Block or unblock a user by GitHub username; blocking also revokes all their tokens."""
+        rows = self._exec("SELECT id FROM users WHERE lower(login) = lower(?)", (login,))
+        if not rows:
+            return False
+        uid = rows[0]["id"]
+        self._exec("UPDATE users SET blocked = ? WHERE id = ?", (1 if blocked else 0, uid))
+        if blocked:
+            self._exec("UPDATE tokens SET revoked = 1 WHERE subject = ?", (uid,))
+        return True
+
+    def count(self, table: str) -> int:
+        if table not in ("clients", "pending", "tokens", "auth_codes", "users"):
+            raise ValueError(table)
+        return int(self._exec(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"])
 
     def save_client(self, client_id: str, info: dict) -> None:
         self._exec("INSERT OR REPLACE INTO clients (client_id, info_json, created_at) VALUES (?, ?, ?)",

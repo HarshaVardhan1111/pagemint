@@ -49,6 +49,7 @@ class Settings:
     secret_key: str = field(default="", repr=False)
     allowed_users: str = ""
     min_github_account_days: int = 30
+    allowed_redirect_uris: str = ""  # extra OAuth redirect URIs besides Claude's and loopback (comma list)
     # Internal switch for tests; deliberately not settable from the environment.
     respect_robots: bool = field(default=True)
 

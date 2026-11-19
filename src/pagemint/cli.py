@@ -91,6 +91,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
     _common(p)
 
+    p = sub.add_parser("admin", help="hosted server owner commands")
+    asub = p.add_subparsers(dest="admin_command", required=True)
+    for name, help_ in (("block", "block a user by GitHub username (ends their sessions)"),
+                        ("unblock", "unblock a user by GitHub username")):
+        a = asub.add_parser(name, help=help_)
+        a.add_argument("login")
+        a.add_argument("--data-dir", metavar="DIR", help="hosted data folder (default: PAGEMINT_DATA_DIR)")
+    a = asub.add_parser("backup", help="write a consistent backup of the hosted data to a .tar.gz file")
+    a.add_argument("dest")
+    a.add_argument("--data-dir", metavar="DIR", help="hosted data folder (default: PAGEMINT_DATA_DIR)")
+    a.add_argument("--keep", type=int, metavar="N", help="keep only the newest N backups in that folder")
+    _common(p)
+
     p = sub.add_parser("map", help="list URLs on a site")
     p.add_argument("url")
     p.add_argument("--limit", type=int, default=500)
@@ -242,6 +255,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="pagemint: %(levelname)s: %(message)s")
     settings = settings_from_args(args)
+    if args.command == "admin":
+        from pathlib import Path
+
+        from pagemint.hosted import admin
+        from pagemint.jobs.store import default_data_dir
+
+        data = Path(args.data_dir or settings.data_dir or default_data_dir())
+        if args.admin_command == "backup":
+            return admin.backup(data, Path(args.dest), keep=args.keep)
+        return admin.set_blocked(data, args.login, blocked=args.admin_command == "block")
     if args.command == "serve" and args.http:
         return run_http(settings, args.host, args.port)
     if args.command in (None, "serve"):

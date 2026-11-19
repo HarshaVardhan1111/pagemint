@@ -68,3 +68,14 @@ def test_dockerfile():
     d = (ROOT / "Dockerfile").read_text()
     assert "USER pagemint" in d and "HEALTHCHECK" in d
     assert '"serve", "--http", "--host", "0.0.0.0"' in d
+
+
+def test_cloud_init_gives_deploy_the_searxng_folder():
+    ci = yaml.safe_load((DEPLOY / "cloud-init.yaml").read_text())
+    run = "\n".join(c if isinstance(c, str) else " ".join(c) for c in ci["runcmd"])
+    assert "chown -R deploy:deploy /opt/pagemint/searxng" in run
+
+
+def test_backup_script_runs_inside_the_container():
+    sh = (DEPLOY / "backup.sh").read_text()
+    assert "docker compose exec -T" in sh and "pagemint admin backup" in sh

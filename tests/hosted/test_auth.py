@@ -208,3 +208,86 @@ async def test_each_user_sees_only_their_saved_companies(app, fake_github, monke
             assert added["count"] == 1, added
             assert (await mcp_call(http, srv.url, tokens["bob"], "saved_companies", {}))["count"] == 0
             assert (await mcp_call(http, srv.url, tokens["alice"], "saved_companies", {}))["count"] == 1
+
+
+# ---- final review fixes ----
+
+async def test_only_known_redirect_uris_can_register(app):
+    with app() as srv:
+        async with httpx.AsyncClient(follow_redirects=False) as http:
+            def reg(uris):
+                return http.post(f"{srv.url}/register", json={
+                    "redirect_uris": uris, "token_endpoint_auth_method": "none",
+                    "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
+            evil = await reg(["https://evil.example/cb"])
+            mixed = await reg([REDIRECT, "https://evil.example/cb"])
+            claude = await reg([REDIRECT])
+            local = await reg(["http://localhost:33418/callback", "http://127.0.0.1:5000/cb"])
+    assert evil.status_code == 400 and "redirect" in evil.text
+    assert mixed.status_code == 400
+    assert claude.status_code == 201 and local.status_code == 201
+
+
+async def test_removed_from_allowlist_loses_access(app, tmp_path):
+    with app(allowed_users="harsha") as srv:
+        async with httpx.AsyncClient(follow_redirects=False) as http:
+            r = await sign_in(srv.url, http)
+            _, tok = await tokens_for(srv.url, http, r["callback"], r["client_id"])
+            body = tok.json()
+    # same data folder, harsha no longer on the list
+    with app(allowed_users="someone-else") as srv2:
+        async with httpx.AsyncClient(follow_redirects=False) as http:
+            denied = await http.post(f"{srv2.url}/mcp", headers={"Authorization": f"Bearer {body['access_token']}"}, json={})
+            ref = await http.post(f"{srv2.url}/token", data={
+                "grant_type": "refresh_token", "refresh_token": body["refresh_token"], "client_id": r["client_id"]})
+    assert denied.status_code == 401
+    assert ref.status_code == 400
+
+
+async def test_blocked_user_loses_access(app, tmp_path):
+    from pagemint.cli import main as cli_main
+
+    with app() as srv:
+        async with httpx.AsyncClient(follow_redirects=False) as http:
+            r = await sign_in(srv.url, http)
+            _, tok = await tokens_for(srv.url, http, r["callback"], r["client_id"])
+            access = tok.json()["access_token"]
+            assert cli_main(["admin", "block", "harsha", "--data-dir", str(tmp_path)]) == 0
+            denied = await http.post(f"{srv.url}/mcp", headers={"Authorization": f"Bearer {access}"}, json={})
+            again = await sign_in(srv.url, http, state="again")
+    assert denied.status_code == 401
+    assert again["callback"].status_code == 403 and "blocked" in again["callback"].text.lower()
+
+
+async def test_pending_logins_are_capped_and_purged(app, monkeypatch):
+    import pagemint.hosted.auth as auth_mod
+
+    monkeypatch.setattr(auth_mod, "MAX_PENDING", 3)
+    with app() as srv:
+        async with httpx.AsyncClient(follow_redirects=False) as http:
+            reg = await http.post(f"{srv.url}/register", json={
+                "redirect_uris": [REDIRECT], "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
+            cid = reg.json()["client_id"]
+            codes = []
+            for i in range(5):
+                a = await http.get(f"{srv.url}/authorize", params={
+                    "response_type": "code", "client_id": cid, "redirect_uri": REDIRECT, "state": f"s{i}",
+                    "code_challenge": CHALLENGE, "code_challenge_method": "S256", "scope": "pagemint"})
+                codes.append((a.status_code, a.headers.get("location", "")))
+    assert all("github" in loc or "authorize" in loc for _, loc in codes[:3])
+    assert "temporarily_unavailable" in codes[4][1] or codes[4][0] in (429, 503)
+
+
+def test_purge_runs_from_provider(tmp_path):
+    import time as _t
+
+    from pagemint.hosted.auth import PageMintOAuthProvider
+    from pagemint.hosted.store import HostedStore
+
+    store = HostedStore(str(tmp_path / "h.db"))
+    store.put_pending("old", {}, expires_at=_t.time() - 5)
+    p = PageMintOAuthProvider(store, make_settings(), None)
+    p._last_purge = 0
+    p.maybe_purge()
+    assert store.take_pending("old") is None and store.count("pending") == 0
