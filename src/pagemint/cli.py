@@ -79,6 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
     _common(p)
 
+    p = sub.add_parser("search", help="search the web with your SearXNG or your own API key")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=10, help="number of results (max 20)")
+    p.add_argument("--fetch", type=int, default=0, metavar="N", help="also read the top N result pages (max 5)")
+    p.add_argument("--provider", default="auto", choices=["auto", "searxng", "tavily", "brave"])
+    p.add_argument("--searxng-url", metavar="URL", help="your SearXNG, e.g. http://localhost:8888 (keys: env vars only)")
+    p.add_argument("--json", action="store_true", help="print the full result as JSON")
+    _common(p)
+
     p = sub.add_parser("map", help="list URLs on a site")
     p.add_argument("url")
     p.add_argument("--limit", type=int, default=500)
@@ -101,6 +110,8 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
     if getattr(args, "out", None):
         overrides["page_char_cap"] = NO_CAP
         overrides["result_char_cap"] = NO_CAP
+    if getattr(args, "searxng_url", None):
+        overrides["searxng_url"] = args.searxng_url
     if getattr(args, "time_limit", None):
         overrides["crawl_time_budget"] = args.time_limit
     return Settings.from_env(**overrides)
@@ -160,6 +171,27 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
                     print(f"<!-- source: {page['url']} -->\n\n{page['markdown']}\n")
             for s in r["skipped"]:
                 print(f"pagemint: skipped {s['url']}: {s['reason']}", file=sys.stderr)
+            _warn(r)
+            return 0
+
+        if args.command == "search":
+            from pagemint.search.service import run_search
+
+            r = await run_search(client, args.query, limit=args.limit, fetch_pages=args.fetch, provider=args.provider)
+            if "error" in r:
+                return _fail(r)
+            if args.json:
+                print(json.dumps(r, ensure_ascii=False, indent=2))
+            else:
+                for item in r["results"]:
+                    print(f"{item['title']} — {item['url']}")
+                    if item["snippet"]:
+                        print(f"    {item['snippet']}")
+                for page in r.get("pages", []):
+                    if "markdown" in page:
+                        print(f"\n<!-- source: {page['url']} -->\n\n{page['markdown']}")
+                    else:
+                        print(f"pagemint: could not read {page['url']}: {page['error']['message']}", file=sys.stderr)
             _warn(r)
             return 0
 

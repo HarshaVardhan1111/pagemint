@@ -97,3 +97,18 @@ def test_options_before_subcommand(server, capsys):
     server.route("/", PAGE)
     assert main([*BASE, "scrape", server.url("/")]) == 0
     assert "# Hello CLI" in capsys.readouterr().out
+
+
+def test_search_command(server, capsys):
+    server.route("/search", Response('{"results": [{"title": "Hit", "url": "https://hit.example/", "content": "snip"}]}',
+                                     headers={"Content-Type": "application/json"}))
+    assert main(["search", "hello", "--searxng-url", server.url(""), *BASE]) == 0
+    out = capsys.readouterr().out
+    assert "Hit — https://hit.example/" in out and "snip" in out
+
+
+def test_search_not_configured(capsys, monkeypatch):
+    for v in ("PAGEMINT_SEARXNG_URL", "PAGEMINT_TAVILY_API_KEY", "PAGEMINT_BRAVE_API_KEY"):
+        monkeypatch.delenv(v, raising=False)
+    assert main(["search", "hello"]) == 1
+    assert "not_configured" in capsys.readouterr().err

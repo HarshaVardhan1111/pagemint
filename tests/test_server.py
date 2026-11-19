@@ -70,3 +70,11 @@ async def test_mcp_job_tools(server, tmp_path, monkeypatch):
     assert {"search_jobs", "company_jobs", "check_job", "saved_companies"} <= names
     assert json.loads(res.content[0].text)["count"] == 0
     assert (tmp_path / "jobs.sqlite3").exists()
+
+
+async def test_mcp_search_tool_not_configured():
+    async with Client(_server()) as c:
+        names = {t.name for t in (await c.list_tools()).tools}
+        res = await c.call_tool("search", {"query": "hello"})
+    assert "search" in names
+    assert res.is_error and json.loads(res.content[0].text)["error"]["type"] == "not_configured"
