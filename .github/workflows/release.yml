@@ -1,8 +1,9 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]  # publishing a GitHub release (Releases -> Draft a new release) uploads to PyPI
+  workflow_dispatch:  # or run it by hand from the Actions tab
 
 permissions:
   contents: read
