@@ -31,6 +31,12 @@ def _result(data: dict) -> CallToolResult:
     )
 
 
+def build_http_app(settings):
+    """The Starlette app serving PageMint over Streamable HTTP at /mcp."""
+    server = build_server(client_factory=lambda: PageMint(settings))
+    return server.streamable_http_app()
+
+
 def build_server(client_factory: Callable[[], PageMint] = PageMint) -> MCPServer:
     holder: dict[str, PageMint] = {}
 

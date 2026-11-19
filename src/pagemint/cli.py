@@ -58,7 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     _common(parser, top=True)
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("serve", help="run the MCP server on stdio")
+    p = sub.add_parser("serve", help="run the MCP server (stdio by default, or HTTP with --http)")
+    p.add_argument("--http", action="store_true", help="serve over HTTP (Streamable HTTP at /mcp)")
+    p.add_argument("--host", default="127.0.0.1", help="address to listen on with --http (default 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8000, help="port with --http (default 8000)")
     _common(p)
 
     p = sub.add_parser("scrape", help="fetch one page")
@@ -115,6 +118,32 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
     if getattr(args, "time_limit", None):
         overrides["crawl_time_budget"] = args.time_limit
     return Settings.from_env(**overrides)
+
+
+def run_http(settings: Settings, host: str, port: int) -> int:
+    from pagemint.hosted.settings import is_local_host, validate_hosted
+
+    if settings.hosted:
+        problems = validate_hosted(settings)
+        if problems:
+            for p in problems:
+                print(f"pagemint: {p}", file=sys.stderr)
+            return 2
+        settings.allow_private_networks = False
+    elif not is_local_host(host):
+        print(
+            f"pagemint: refusing to expose PageMint on {host} without sign-in. "
+            "Use the hosted setup (PAGEMINT_HOSTED=1 with GitHub sign-in) or listen on 127.0.0.1.",
+            file=sys.stderr,
+        )
+        return 2
+    import uvicorn
+
+    from pagemint.server import build_http_app
+
+    uvicorn.run(build_http_app(settings), host=host, port=port, log_level="warning",
+                proxy_headers=True, forwarded_allow_ips="*" if settings.hosted else "127.0.0.1")
+    return 0
 
 
 def run_server(settings: Settings) -> None:
@@ -213,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="pagemint: %(levelname)s: %(message)s")
     settings = settings_from_args(args)
+    if args.command == "serve" and args.http:
+        return run_http(settings, args.host, args.port)
     if args.command in (None, "serve"):
         run_server(settings)
         return 0

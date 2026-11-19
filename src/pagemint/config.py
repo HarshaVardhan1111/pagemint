@@ -41,6 +41,14 @@ class Settings:
     brave_api_key: str = field(default="", repr=False)
     search_provider: str = ""
     search_fallback: bool = False
+    # Hosted mode (pagemint serve --http on a public server with GitHub sign-in).
+    hosted: bool = False
+    public_url: str = ""
+    github_client_id: str = ""
+    github_client_secret: str = field(default="", repr=False)
+    secret_key: str = field(default="", repr=False)
+    allowed_users: str = ""
+    min_github_account_days: int = 30
     # Internal switch for tests; deliberately not settable from the environment.
     respect_robots: bool = field(default=True)
 
